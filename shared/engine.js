@@ -252,8 +252,10 @@ export function stepPlayerGrid(grid, bombs, p, input, dt) {
 // ---- bombs & explosions ------------------------------------------------------
 
 function placeBomb(state, p) {
-  const col = Math.floor(p.x);
-  const row = Math.floor(p.y);
+  // Drop on the cell the player is centred over (nearest centre), so a bomb
+  // tapped mid-glide lands on the tile they occupy, not the one ahead.
+  const col = Math.round(p.x - 0.5);
+  const row = Math.round(p.y - 0.5);
   const active = state.bombs.filter((b) => b.owner === p.slot).length;
   if (active >= p.maxBombs) return;
   if (state.bombs.some((b) => b.col === col && b.row === row)) return;

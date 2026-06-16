@@ -52,6 +52,8 @@ let lastSentInput = null;     // dedupe identical INPUT messages
 let onlineStarted = false;    // has START been received?
 let resultOpenOnline = false;
 let predicted = null;         // client-side predicted local player {x,y,dir,moving,speedPicks}
+let predBombs = [];           // client-predicted own bombs awaiting server confirmation
+let predBombHeld = false;     // bomb-button edge state for local bomb prediction
 
 // HUD refresh throttle (the DOM update itself is diff-based, but there is no
 // point doing the comparisons more than a dozen times a second).
@@ -227,9 +229,25 @@ function tickOnline(frameDt) {
     // Keep ability-derived inputs to the movement model synced from authority.
     predicted.speedPicks = sp.speedPicks;
     predicted.ghost = sp.ghost;
-    stepPlayerGrid(curSnap.grid, curSnap.bombs, predicted, inp, Math.min(frameDt, 0.05));
+    // Bomb placement is server-authoritative and only comes back in the next
+    // snapshot, so predict our OWN bombs locally — otherwise we'd predict-walk
+    // back through a bomb the server already blocks and rubber-band. Each entry
+    // expires once the real bomb arrives in curSnap.bombs (or after a timeout).
+    const nowMs = performance.now();
+    if (inp.bomb && !predBombHeld) {
+      const bc = Math.round(predicted.x - 0.5), br = Math.round(predicted.y - 0.5);
+      const dup = predBombs.some((b) => b.col === bc && b.row === br) ||
+                  curSnap.bombs.some((b) => b.col === bc && b.row === br);
+      if (!dup) predBombs.push({ col: bc, row: br, until: nowMs + 1500 });
+    }
+    predBombHeld = !!inp.bomb;
+    predBombs = predBombs.filter((b) =>
+      b.until > nowMs && !curSnap.bombs.some((s) => s.col === b.col && s.row === b.row));
+    const bombs = predBombs.length ? curSnap.bombs.concat(predBombs) : curSnap.bombs;
+    stepPlayerGrid(curSnap.grid, bombs, predicted, inp, Math.min(frameDt, 0.05));
   } else {
     predicted = null;
+    predBombHeld = false;
   }
 
   // Interpolate other players between the previous and current snapshots for
@@ -272,7 +290,11 @@ function reconcilePrediction(snap) {
   predicted.speedPicks = sp.speedPicks;
   predicted.ghost = sp.ghost;
   if (Math.hypot(sp.x - predicted.x, sp.y - predicted.y) > 0.9) {
-    predicted.x = sp.x; predicted.y = sp.y; predicted.stepping = false;
+    // Snap to the nearest cell centre (not the raw, possibly mid-step server
+    // position) so the next step's round-to-centre can't jump us back off-grid.
+    predicted.x = Math.round(sp.x - 0.5) + 0.5;
+    predicted.y = Math.round(sp.y - 0.5) + 0.5;
+    predicted.stepping = false;
   }
 }
 
@@ -326,11 +348,18 @@ function detectEvents(prev, snap) {
     renderer.shake(Math.min(8 + newCenters * 3, 18));
   }
 
-  // Powerup pickups -> any player's total upgrades increased.
   for (const p of snap.players) {
     const o = prev.players.find((q) => q.slot === p.slot);
     if (!o) continue;
-    if (upgradeTotal(p) > upgradeTotal(o)) sound.play('pickup');
+    // Powerup grabbed: a loose powerup under a still-alive player vanished. This
+    // catches every kind — including a redundant ghost/pierce or a maxed stat
+    // that wouldn't show up as a stat increase.
+    if (p.alive) {
+      const col = Math.floor(p.x), row = Math.floor(p.y);
+      const had = prev.powerups.some((pu) => pu.col === col && pu.row === row);
+      const gone = !snap.powerups.some((pu) => pu.col === col && pu.row === row);
+      if (had && gone) sound.play('pickup');
+    }
     // A shield just absorbed a hit (charge dropped but still alive).
     if (p.alive && p.shield < o.shield) { sound.play('shield'); renderer.shake(10); }
     // Player just died.
@@ -341,12 +370,6 @@ function detectEvents(prev, snap) {
   if (prev.phase === 'playing' && snap.phase !== 'playing') {
     sound.play(snap.winner === null || snap.winner === undefined ? 'draw' : 'win');
   }
-}
-
-// Sum of a player's collected upgrades — a jump means a powerup was grabbed.
-function upgradeTotal(p) {
-  return p.maxBombs + p.range + p.speedPicks + p.shield +
-         (p.ghost ? 1 : 0) + (p.pierce ? 1 : 0);
 }
 
 // ===========================================================================
@@ -407,6 +430,8 @@ function resetOnlineState() {
   resultOpenOnline = false;
   lastSentInput = null;
   predicted = null;
+  predBombs = [];
+  predBombHeld = false;
 }
 
 // ===========================================================================
