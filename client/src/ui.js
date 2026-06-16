@@ -134,6 +134,7 @@ export function createUI(callbacks = {}) {
     syncReadyBtn();
     $('lobby-players').innerHTML = '';
     $('lobby-hint').textContent = '';
+    resetHud();
   }
 
   function updateLobby(data) {
@@ -172,16 +173,26 @@ export function createUI(callbacks = {}) {
   const hudTimer = $('hud-timer');
   const suddenDeath = $('sudden-death');
 
-  function updateHud(snap, localSlots = []) {
-    if (!snap) return;
-    // Per-player cards.
+  // The HUD is refreshed many times a second, so it must be DIFF-based: build
+  // the per-player cards once for a given roster, then only poke text nodes /
+  // classes when their values actually change. Rebuilding innerHTML every frame
+  // (the old approach) thrashed layout and made the whole UI feel laggy.
+  let hudCards = new Map(); // slot -> { card, nameEl, scoreEl, bombsEl, rangeEl, speedEl, dead }
+  let hudRosterKey = '';
+  let lastRoundText = '';
+  let lastTimerText = '';
+  let lastTimerDanger = null;
+  let lastSudden = null;
+
+  function buildHudCards(players, localSlots) {
     hudPlayers.innerHTML = '';
-    for (const p of [...snap.players].sort((a, b) => a.slot - b.slot)) {
+    hudCards = new Map();
+    for (const p of players) {
       const color = PLAYER_COLORS[p.slot] || '#fff';
-      const card = document.createElement('div');
-      card.className = 'hud-card' + (p.alive ? '' : ' dead');
-      card.style.borderLeftColor = color;
       const youTag = localSlots.includes(p.slot) ? ' ◂' : '';
+      const card = document.createElement('div');
+      card.className = 'hud-card';
+      card.style.borderLeftColor = color;
       card.innerHTML = `
         <div class="hc-main">
           <span class="hc-name" style="color:${color}">${escapeHtml(p.name)}${youTag}</span>
@@ -191,24 +202,70 @@ export function createUI(callbacks = {}) {
           <span title="Bomben">💣<b>${p.maxBombs}</b></span>
           <span title="Reichweite">🔥<b>${p.range}</b></span>
           <span title="Tempo">⚡<b>${p.speedPicks}</b></span>
-        </div>
-      `;
+        </div>`;
+      const bs = card.querySelectorAll('.hc-stats b');
+      hudCards.set(p.slot, {
+        card,
+        scoreEl: card.querySelector('.hc-score'),
+        bombsEl: bs[0], rangeEl: bs[1], speedEl: bs[2],
+        dead: false,
+      });
       hudPlayers.appendChild(card);
     }
+  }
 
-    hudRound.textContent = `Runde ${snap.round} · Best of ${snap.winsToWin}`;
+  function updateHud(snap, localSlots = []) {
+    if (!snap) return;
+    const players = [...snap.players].sort((a, b) => a.slot - b.slot);
+
+    // Rebuild only when the roster (slots / names / who is local) changes.
+    const rosterKey = players.map((p) => `${p.slot}:${p.name}`).join('|') + '#' + localSlots.join(',');
+    if (rosterKey !== hudRosterKey) {
+      buildHudCards(players, localSlots);
+      hudRosterKey = rosterKey;
+    }
+
+    for (const p of players) {
+      const c = hudCards.get(p.slot);
+      if (!c) continue;
+      const score = `Siege: ${p.score}`;
+      if (c.scoreEl.textContent !== score) c.scoreEl.textContent = score;
+      const mb = String(p.maxBombs); if (c.bombsEl.textContent !== mb) c.bombsEl.textContent = mb;
+      const rg = String(p.range);    if (c.rangeEl.textContent !== rg) c.rangeEl.textContent = rg;
+      const sp = String(p.speedPicks); if (c.speedEl.textContent !== sp) c.speedEl.textContent = sp;
+      if (c.dead !== !p.alive) { c.dead = !p.alive; c.card.classList.toggle('dead', !p.alive); }
+    }
+
+    const roundText = `Runde ${snap.round} · Best of ${snap.winsToWin}`;
+    if (roundText !== lastRoundText) { hudRound.textContent = roundText; lastRoundText = roundText; }
 
     // Timer / sudden-death countdown.
-    const tLeft = SUDDEN_DEATH_TIME - snap.t;
-    if (snap.t >= SUDDEN_DEATH_TIME) {
-      suddenDeath.hidden = false;
-      hudTimer.textContent = 'Die Wände schließen sich!';
-      hudTimer.classList.add('danger');
+    const sudden = snap.t >= SUDDEN_DEATH_TIME;
+    if (sudden !== lastSudden) { suddenDeath.hidden = !sudden; lastSudden = sudden; }
+    let timerText, danger;
+    if (sudden) {
+      timerText = 'Die Wände schließen sich!';
+      danger = true;
     } else {
-      suddenDeath.hidden = true;
-      hudTimer.classList.toggle('danger', tLeft <= 15);
-      hudTimer.textContent = `Sudden Death in ${Math.ceil(tLeft)}s`;
+      const tLeft = SUDDEN_DEATH_TIME - snap.t;
+      timerText = `Sudden Death in ${Math.ceil(tLeft)}s`;
+      danger = tLeft <= 15;
     }
+    if (timerText !== lastTimerText) { hudTimer.textContent = timerText; lastTimerText = timerText; }
+    if (danger !== lastTimerDanger) { hudTimer.classList.toggle('danger', danger); lastTimerDanger = danger; }
+  }
+
+  // Reset cached HUD state so the next match rebuilds cleanly, and clear any
+  // transient banner left over from a previous match (e.g. sudden death) so it
+  // can't flash before the first updateHud of the new round.
+  function resetHud() {
+    hudRosterKey = '';
+    lastRoundText = '';
+    lastTimerText = '';
+    lastTimerDanger = false;
+    lastSudden = false;
+    suddenDeath.hidden = true;
+    hudTimer.classList.remove('danger');
   }
 
   // ---- result -------------------------------------------------------------
@@ -256,12 +313,38 @@ export function createUI(callbacks = {}) {
     toast(msg);
   }
 
+  // ---- in-game buttons (quit + sound) -------------------------------------
+  $('btn-quit').addEventListener('click', () => cb.onBackToMenu && cb.onBackToMenu());
+
+  const soundBtn = $('btn-sound');
+  function syncSoundBtn() {
+    const muted = cb.sound ? cb.sound.isMuted() : false;
+    soundBtn.classList.toggle('is-muted', muted);
+    soundBtn.textContent = muted ? '🔇' : '🔊';
+    soundBtn.title = muted ? 'Ton einschalten' : 'Ton ausschalten';
+  }
+  soundBtn.addEventListener('click', () => {
+    if (cb.sound) { cb.sound.unlock(); cb.sound.toggleMuted(); }
+    syncSoundBtn();
+  });
+  syncSoundBtn();
+
+  // Delegated click feedback for every button (the sound toggle manages its own
+  // audio, so skip it here to avoid a click right as you mute).
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn, .seg-btn');
+    if (!btn || btn.id === 'btn-sound' || btn.disabled) return;
+    const back = btn.hasAttribute('data-back') || btn.id === 'btn-leave-room' || btn.id === 'btn-result-menu';
+    if (cb.sound) cb.sound.play(back ? 'uiBack' : 'uiClick');
+  });
+
   return {
     show,
     enterRoom,
     resetOnline,
     updateLobby,
     updateHud,
+    resetHud,
     showResult,
     showError,
     // expose so main can read the selected name if it needs to reconnect

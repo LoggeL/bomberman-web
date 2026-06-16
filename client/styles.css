@@ -1,6 +1,10 @@
 /* ============================================================================
    Bomberman — Neon Arena. Polished dark neon-arcade theme.
    All screens are absolutely positioned overlays on top of the canvas.
+
+   Animation philosophy: everything that moves uses transform/opacity only so
+   the compositor can run it on the GPU (no layout/paint thrash during play).
+   Anything purely decorative is gated behind prefers-reduced-motion.
    ========================================================================== */
 
 :root {
@@ -17,6 +21,8 @@
   --warn: #ffcf3f;
   --glow: 0 0 24px rgba(63, 182, 255, 0.35);
   --radius: 16px;
+  /* Shared accessible focus ring — reused by every interactive control. */
+  --focus-ring: 0 0 0 3px rgba(63, 182, 255, 0.55);
   --font: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
 }
 
@@ -25,6 +31,7 @@
 html, body {
   margin: 0;
   height: 100%;
+  /* Layer the static radial glows over a slow-drifting aurora (::before). */
   background:
     radial-gradient(1200px 800px at 50% -10%, #16203a 0%, transparent 60%),
     radial-gradient(900px 700px at 110% 110%, #1a1330 0%, transparent 55%),
@@ -34,6 +41,25 @@ html, body {
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   user-select: none;
+}
+
+/* Cheap ambient background: one extra layer, GPU-only transform animation,
+   sitting behind the canvas and every screen (z-index 0, board is above). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -25%;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(40% 40% at 25% 30%, rgba(63, 182, 255, 0.10), transparent 70%),
+    radial-gradient(45% 45% at 80% 70%, rgba(255, 84, 112, 0.10), transparent 70%);
+  filter: blur(8px);
+  animation: aurora-drift 32s ease-in-out infinite alternate;
+}
+@keyframes aurora-drift {
+  from { transform: translate3d(-3%, -2%, 0) scale(1.05); }
+  to   { transform: translate3d(3%, 2%, 0) scale(1.15); }
 }
 
 #app {
@@ -63,7 +89,10 @@ html, body {
   padding: 24px;
   z-index: 10;
 }
-.screen.is-visible { display: flex; }
+/* Fade the dimming backdrop in; the inner .panel/.result handle their own
+   pop animation so the overlay and its content feel deliberately staged. */
+.screen.is-visible { display: flex; animation: screen-fade 0.22s ease both; }
+@keyframes screen-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* HUD screen is not a dimming overlay; it sits on top transparently. */
 .screen-overlayless {
@@ -73,7 +102,7 @@ html, body {
   padding: 0;
   pointer-events: none;
 }
-.screen-overlayless.is-visible { display: block; }
+.screen-overlayless.is-visible { display: block; animation: none; }
 .screen-overlayless .btn { pointer-events: auto; }
 
 /* Dimmed backdrop for modal-like screens. */
@@ -85,6 +114,8 @@ html, body {
 /* ------------------------------ Panels ----------------------------------- */
 .panel {
   width: min(440px, 100%);
+  max-height: calc(100dvh - 32px); /* never taller than the viewport... */
+  overflow-y: auto;               /* ...scroll instead of clipping content */
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: var(--radius);
@@ -138,18 +169,26 @@ html, body {
   border-radius: 12px;
   padding: 13px 20px;
   cursor: pointer;
+  /* will-change keeps the press response snappy without a paint on every tap. */
   transition: transform 0.08s ease, box-shadow 0.2s ease, background 0.2s ease, opacity 0.2s ease;
   background: var(--bg-2);
 }
 .btn:hover { transform: translateY(-1px); }
-.btn:active { transform: translateY(1px); }
+/* Slightly stronger, springier press for a tactile "clunk". */
+.btn:active { transform: translateY(1px) scale(0.97); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+/* Accessible, mouse-quiet focus ring (keyboard/AT only). */
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 
 .btn-primary {
   background: linear-gradient(135deg, var(--accent), #ff7a90);
   box-shadow: 0 8px 22px rgba(255, 84, 112, 0.35);
   color: #1a0610;
 }
+.btn-primary:focus-visible { box-shadow: 0 8px 22px rgba(255, 84, 112, 0.35), var(--focus-ring); }
 .btn-secondary {
   background: linear-gradient(135deg, var(--accent-2), #71cbff);
   box-shadow: 0 8px 22px rgba(63, 182, 255, 0.3);
@@ -162,6 +201,17 @@ html, body {
 }
 .btn-ghost:hover { color: var(--text); }
 .btn-tiny { font-size: 13px; padding: 7px 12px; border-radius: 9px; }
+
+/* Sound toggle: the .is-muted class (set by JS) reads as visibly "off". */
+#btn-sound {
+  line-height: 1;
+  transition: transform 0.08s ease, opacity 0.2s ease, filter 0.2s ease;
+}
+#btn-sound.is-muted {
+  opacity: 0.5;
+  filter: grayscale(1);
+}
+#btn-sound:not(.is-muted):hover { transform: translateY(-1px) scale(1.06); }
 
 .row-buttons { display: flex; gap: 12px; margin-top: 22px; }
 .row-buttons .btn { flex: 1; }
@@ -205,9 +255,11 @@ html, body {
   border-radius: 10px;
   padding: 11px 0;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, transform 0.08s ease;
 }
 .seg-btn:hover { color: var(--text); }
+.seg-btn:active { transform: scale(0.95); }
+.seg-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .seg-btn.is-active {
   color: #04131f;
   background: linear-gradient(135deg, var(--accent-2), #71cbff);
@@ -270,6 +322,7 @@ html, body {
   letter-spacing: 8px;
   color: var(--accent-2);
   text-shadow: var(--glow);
+  font-variant-numeric: tabular-nums; /* code never shifts width as it changes */
 }
 
 .player-list { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -281,15 +334,39 @@ html, body {
   border: 1px solid var(--panel-border);
   border-radius: 10px;
   padding: 11px 14px;
+  /* Each (re)rendered row slides in — the list rebuild feels lively. */
+  animation: row-in 0.26s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+/* Light stagger across the first few slots (max 4 players). */
+.player-list li:nth-child(2) { animation-delay: 0.04s; }
+.player-list li:nth-child(3) { animation-delay: 0.08s; }
+.player-list li:nth-child(4) { animation-delay: 0.12s; }
+@keyframes row-in {
+  from { transform: translateX(-10px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
 }
 .player-list .pl-swatch { width: 14px; height: 14px; border-radius: 4px; box-shadow: 0 0 10px currentColor; }
 .player-list .pl-name { flex: 1; font-weight: 600; }
 .player-list .pl-host { font-size: 11px; color: var(--warn); text-transform: uppercase; letter-spacing: 0.5px; }
 .player-list .pl-ready { font-size: 13px; font-weight: 700; }
-.player-list .pl-ready.ready { color: var(--good); }
+/* "Ready" players gently pulse so the lobby reads at a glance. */
+.player-list .pl-ready.ready { color: var(--good); animation: ready-pulse 1.6s ease-in-out infinite; }
 .player-list .pl-ready.waiting { color: var(--text-dim); }
+@keyframes ready-pulse { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
 .lobby-hint { color: var(--text-dim); font-size: 13px; text-align: center; margin: 12px 0 0; min-height: 18px; }
-.btn-ready.is-ready { background: linear-gradient(135deg, var(--good), #8be88b); color: #07210a; box-shadow: 0 8px 22px rgba(93, 217, 93, 0.3); }
+/* Optimistic: the moment Ready is pressed, JS toggles .is-ready and the
+   button instantly turns green + gives a confirming pop, no round-trip wait. */
+.btn-ready.is-ready {
+  background: linear-gradient(135deg, var(--good), #8be88b);
+  color: #07210a;
+  box-shadow: 0 8px 22px rgba(93, 217, 93, 0.3);
+  animation: ready-confirm 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.4);
+}
+@keyframes ready-confirm {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(1.07); }
+  100% { transform: scale(1); }
+}
 
 /* -------------------------------- HUD ------------------------------------ */
 .hud-bar {
@@ -311,17 +388,41 @@ html, body {
   padding: 8px 12px;
   min-width: 150px;
   transition: opacity 0.2s;
+  /* Cards drop in when the HUD is (re)built at the start of a round. */
+  animation: card-in 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+.hud-card:nth-child(2) { animation-delay: 0.05s; }
+.hud-card:nth-child(3) { animation-delay: 0.10s; }
+.hud-card:nth-child(4) { animation-delay: 0.15s; }
+@keyframes card-in {
+  from { transform: translateY(-8px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
 }
 .hud-card.dead { opacity: 0.4; filter: grayscale(0.6); }
 .hud-card .hc-main { display: flex; flex-direction: column; gap: 2px; }
 .hud-card .hc-name { font-weight: 700; font-size: 14px; }
-.hud-card .hc-score { font-size: 12px; color: var(--text-dim); }
-.hud-card .hc-stats { display: flex; gap: 9px; margin-left: auto; font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* tabular-nums + min-width stop score text from nudging the layout on update. */
+.hud-card .hc-score { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.hud-card .hc-stats {
+  display: flex;
+  gap: 9px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
 .hud-card .hc-stats b { color: var(--text); font-weight: 700; }
 
 .hud-center { text-align: center; pointer-events: none; }
 .hud-round { font-weight: 800; font-size: 16px; letter-spacing: 1px; }
-.hud-timer { font-size: 13px; color: var(--text-dim); font-variant-numeric: tabular-nums; min-height: 16px; }
+/* Fixed-ish width so the countdown ticking down never jitters the centre. */
+.hud-timer {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  min-height: 16px;
+  min-width: 84px;
+}
 .hud-timer.danger { color: var(--accent); font-weight: 700; }
 
 .sudden-death-banner {
@@ -340,7 +441,25 @@ html, body {
 /* ------------------------------ Result ----------------------------------- */
 .result-panel { text-align: center; }
 .result-winner { font-size: 22px; font-weight: 800; margin: 6px 0 18px; }
-.result-winner .crown { font-size: 40px; display: block; margin-bottom: 6px; }
+/* Celebratory entrance: the whole winner block scales/fades in... */
+.result-winner { animation: winner-in 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.3) both; }
+@keyframes winner-in {
+  from { transform: scale(0.8); opacity: 0; }
+  to   { transform: scale(1); opacity: 1; }
+}
+/* ...and the crown gets its own bouncing pop after a short beat. */
+.result-winner .crown {
+  font-size: 40px;
+  display: block;
+  margin-bottom: 6px;
+  transform-origin: 50% 80%;
+  animation: crown-bounce 0.7s 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.5) both;
+}
+@keyframes crown-bounce {
+  0%   { transform: translateY(-14px) scale(0.5) rotate(-12deg); opacity: 0; }
+  60%  { transform: translateY(4px) scale(1.12) rotate(4deg); opacity: 1; }
+  100% { transform: none; opacity: 1; }
+}
 .result-scores { display: flex; flex-direction: column; gap: 8px; }
 .result-scores .rs-row {
   display: flex; align-items: center; gap: 10px;
@@ -348,7 +467,13 @@ html, body {
   border: 1px solid var(--panel-border);
   border-radius: 10px;
   padding: 9px 14px;
+  /* Score rows cascade in with a stagger for a leaderboard reveal. */
+  animation: row-in 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
 }
+.result-scores .rs-row:nth-child(1) { animation-delay: 0.10s; }
+.result-scores .rs-row:nth-child(2) { animation-delay: 0.16s; }
+.result-scores .rs-row:nth-child(3) { animation-delay: 0.22s; }
+.result-scores .rs-row:nth-child(4) { animation-delay: 0.28s; }
 .result-scores .rs-swatch { width: 12px; height: 12px; border-radius: 4px; box-shadow: 0 0 10px currentColor; }
 .result-scores .rs-name { flex: 1; text-align: left; font-weight: 600; }
 .result-scores .rs-score { font-weight: 800; font-variant-numeric: tabular-nums; }
@@ -369,8 +494,43 @@ html, body {
 }
 @keyframes toast-in { from { transform: translate(-50%, 12px); opacity: 0; } to { transform: translateX(-50%); opacity: 1; } }
 
+/* --------------------------- Responsive ---------------------------------- */
 @media (max-width: 520px) {
   .logo { font-size: 40px; }
-  .hud-card { min-width: 0; }
+  .panel { padding: 22px 20px 20px; }
+  .hud-bar { gap: 10px; padding: 8px 10px; }
+  .hud-card { min-width: 0; padding: 7px 10px; }
   .hud-card .hc-stats { display: none; }
+  .hud-timer { min-width: 0; }
+  /* Keep the action buttons reachable but compact on narrow phones. */
+  #btn-sound, #btn-quit { padding: 7px 10px; }
+}
+
+/* Very short viewports (landscape phones): trim vertical chrome so the
+   board and the panel both stay on screen. */
+@media (max-height: 480px) {
+  .panel { padding: 16px 18px; max-height: calc(100dvh - 16px); }
+  .panel h2 { margin-bottom: 12px; font-size: 20px; }
+  .logo { font-size: 32px; }
+  .tagline { margin: 4px 0 12px; }
+  .menu-buttons { margin-bottom: 12px; }
+  .field { margin-bottom: 12px; }
+  .sudden-death-banner { top: 52px; }
+}
+
+/* ------------------------- Reduced motion -------------------------------- */
+/* Honour the OS setting: kill all non-essential, decorative motion. The
+   sudden-death/ready pulses are informational, so we soften rather than
+   keeping them flashing — every animation is reduced to a near-instant fade. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  body::before { animation: none; }
+  .btn:hover, .btn:active, .seg-btn:active, #btn-sound:hover { transform: none; }
 }

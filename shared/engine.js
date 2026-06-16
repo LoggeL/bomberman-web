@@ -33,6 +33,10 @@ function makeRng(seed) {
 const key = (col, row) => row * COLS + col;
 const inBounds = (col, row) => col >= 0 && col < COLS && row >= 0 && row < ROWS;
 
+// Shared empty pass-set for callers (e.g. client prediction) that have no
+// bomb pass-through state. Never mutated.
+const EMPTY_SET = new Set();
+
 // ---- construction ------------------------------------------------------------
 
 // playerDefs: [{ id, name, slot }]. winsToWin: rounds needed to win the match.
@@ -56,6 +60,7 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
     spiral: null,        // sudden-death cell order
     spiralIdx: 0,
     spiralTimer: 0,
+    bombSeq: 0,          // monotonic id source so each bomb has a stable identity
   };
 
   for (const def of playerDefs) {
@@ -152,26 +157,32 @@ export function setInput(state, slot, input) {
 }
 
 // ---- collision ---------------------------------------------------------------
+//
+// These are pure over (grid, bombs, pass): they take the world data explicitly
+// rather than a full game state, so the browser can reuse the EXACT same
+// collision + cornering rules for client-side prediction (see predictMove).
+// `pass` is a Set of tile keys the player is allowed to walk through (bomb
+// tiles they have not yet stepped off).
 
-function cellBlocks(state, p, col, row) {
+function cellBlocks(grid, bombs, pass, col, row) {
   if (!inBounds(col, row)) return true;
-  const c = state.grid[key(col, row)];
+  const c = grid[key(col, row)];
   if (c === CELL.SOLID || c === CELL.BRICK) return true;
   // A bomb blocks unless this player is still allowed to pass it.
-  for (const b of state.bombs) {
-    if (b.col === col && b.row === row && !p.passBombs.has(key(col, row))) return true;
+  for (const b of bombs) {
+    if (b.col === col && b.row === row && !pass.has(key(col, row))) return true;
   }
   return false;
 }
 
-function canStand(state, p, x, y) {
+function canStand(grid, bombs, pass, x, y) {
   const minC = Math.floor(x - PLAYER_HALF);
   const maxC = Math.floor(x + PLAYER_HALF);
   const minR = Math.floor(y - PLAYER_HALF);
   const maxR = Math.floor(y + PLAYER_HALF);
   for (let r = minR; r <= maxR; r++) {
     for (let c = minC; c <= maxC; c++) {
-      if (cellBlocks(state, p, c, r)) return false;
+      if (cellBlocks(grid, bombs, pass, c, r)) return false;
     }
   }
   return true;
@@ -179,26 +190,53 @@ function canStand(state, p, x, y) {
 
 // Move along a single axis with Bomberman-style cornering assist: when blocked
 // head-on, nudge toward the lane centre so players can round corners smoothly.
-function moveAxis(state, p, mx, my) {
-  if (canStand(state, p, p.x + mx, p.y + my)) { p.x += mx; p.y += my; return; }
+function moveAxis(grid, bombs, pass, p, mx, my) {
+  if (canStand(grid, bombs, pass, p.x + mx, p.y + my)) { p.x += mx; p.y += my; return; }
   const step = Math.abs(mx) + Math.abs(my);
   if (mx !== 0) {
     const cy = Math.floor(p.y) + 0.5;
     const dir = Math.sign(cy - p.y);
     if (dir !== 0) {
       const ny = p.y + dir * Math.min(step, Math.abs(cy - p.y));
-      if (canStand(state, p, p.x + mx, ny)) { p.x += mx; p.y = ny; return; }
-      if (canStand(state, p, p.x, ny)) { p.y = ny; return; }
+      if (canStand(grid, bombs, pass, p.x + mx, ny)) { p.x += mx; p.y = ny; return; }
+      if (canStand(grid, bombs, pass, p.x, ny)) { p.y = ny; return; }
     }
   } else if (my !== 0) {
     const cx = Math.floor(p.x) + 0.5;
     const dir = Math.sign(cx - p.x);
     if (dir !== 0) {
       const nx = p.x + dir * Math.min(step, Math.abs(cx - p.x));
-      if (canStand(state, p, nx, p.y + my)) { p.x = nx; p.y += my; return; }
-      if (canStand(state, p, nx, p.y)) { p.x = nx; return; }
+      if (canStand(grid, bombs, pass, nx, p.y + my)) { p.x = nx; p.y += my; return; }
+      if (canStand(grid, bombs, pass, nx, p.y)) { p.x = nx; return; }
     }
   }
+}
+
+// ---- client-side prediction --------------------------------------------------
+//
+// Advance ONE player's position locally using the same movement model as the
+// authoritative step(), so the browser can move the local player the instant a
+// key is pressed instead of waiting a network round-trip. The caller passes the
+// latest known grid + bombs (from a server snapshot) and the player's own
+// derived speed; we mutate p.x / p.y / p.dir / p.moving in place.
+//
+//   grid  : Uint8Array | number[] of CELL values (snapshot grid is a plain array)
+//   bombs : [{ col, row }, ...] from the snapshot
+//   p     : { x, y, dir, moving, speedPicks, passBombs? }
+//   input : { up, down, left, right }
+//   dt    : seconds since the previous prediction step
+export function predictMove(grid, bombs, p, input, dt) {
+  const speed = (BASE_SPEED + (p.speedPicks || 0) * SPEED_PER_PICKUP) * dt;
+  let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+  p.moving = dx !== 0 || dy !== 0;
+  if (dx !== 0 && dy !== 0) dy = 0; // 4-directional, same as the engine
+  if (dx > 0) p.dir = 'right'; else if (dx < 0) p.dir = 'left';
+  else if (dy > 0) p.dir = 'down'; else if (dy < 0) p.dir = 'up';
+
+  const pass = p.passBombs || EMPTY_SET;
+  if (dx !== 0) moveAxis(grid, bombs, pass, p, dx * speed, 0);
+  if (dy !== 0) moveAxis(grid, bombs, pass, p, 0, dy * speed);
 }
 
 // ---- bombs & explosions ------------------------------------------------------
@@ -209,7 +247,7 @@ function placeBomb(state, p) {
   const active = state.bombs.filter((b) => b.owner === p.slot).length;
   if (active >= p.maxBombs) return;
   if (state.bombs.some((b) => b.col === col && b.row === row)) return;
-  state.bombs.push({ col, row, owner: p.slot, timer: BOMB_FUSE, range: p.range });
+  state.bombs.push({ id: state.bombSeq++, col, row, owner: p.slot, timer: BOMB_FUSE, range: p.range });
   p.passBombs.add(key(col, row)); // let the owner step off it
 }
 
@@ -246,9 +284,15 @@ function detonate(state, bomb, toExplode) {
 }
 
 function addFlame(state, col, row, kind, orient) {
-  // Overlapping flames just refresh the timer at that tile.
+  // Overlapping flames refresh the timer at that tile. A 'center' always wins
+  // over a residual arm/tip so a new detonation landing on an old flame is
+  // still marked as a blast centre (drawn correctly + detectable as an event).
   const existing = state.flames.find((f) => f.col === col && f.row === row);
-  if (existing) { existing.timer = FLAME_TIME; return; }
+  if (existing) {
+    existing.timer = FLAME_TIME;
+    if (kind === 'center') { existing.kind = 'center'; existing.orient = null; }
+    return;
+  }
   state.flames.push({ col, row, kind, orient, timer: FLAME_TIME });
 }
 
@@ -282,8 +326,8 @@ export function step(state, dt = TICK_DT) {
     if (dx > 0) p.dir = 'right'; else if (dx < 0) p.dir = 'left';
     else if (dy > 0) p.dir = 'down'; else if (dy < 0) p.dir = 'up';
 
-    if (dx !== 0) moveAxis(state, p, dx * speed, 0);
-    if (dy !== 0) moveAxis(state, p, 0, dy * speed);
+    if (dx !== 0) moveAxis(state.grid, state.bombs, p.passBombs, p, dx * speed, 0);
+    if (dy !== 0) moveAxis(state.grid, state.bombs, p.passBombs, p, 0, dy * speed);
 
     // release bomb tiles the player has fully walked off of
     for (const tk of [...p.passBombs]) {
@@ -428,7 +472,7 @@ export function toSnapshot(state) {
       alive: p.alive, maxBombs: p.maxBombs, range: p.range,
       speedPicks: p.speedPicks, score: p.score, moving: p.moving,
     })),
-    bombs: state.bombs.map((b) => ({ col: b.col, row: b.row, timer: b.timer, range: b.range })),
+    bombs: state.bombs.map((b) => ({ id: b.id, col: b.col, row: b.row, timer: b.timer, range: b.range })),
     flames: state.flames.map((f) => ({ col: f.col, row: f.row, kind: f.kind, orient: f.orient })),
   };
 }

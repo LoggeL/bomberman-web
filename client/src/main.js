@@ -2,18 +2,30 @@
 // switches cleanly between three modes:
 //   'menu'   — no game running, just menus.
 //   'local'  — this client owns a game instance and simulates it.
-//   'online' — the server owns the game; we render incoming snapshots.
+//   'online' — the server owns the game; we render incoming snapshots, but we
+//              client-side *predict* our own player so it responds instantly.
 
-import { createGame, step, setInput, toSnapshot } from '../../shared/engine.js';
-import { TICK_DT } from '../../shared/constants.js';
+import { createGame, step, setInput, toSnapshot, predictMove } from '../../shared/engine.js';
+import { TICK_DT, COLS } from '../../shared/constants.js';
 import { SNAPSHOT_HZ } from '../../shared/protocol.js';
 import { createRenderer } from './render.js';
 import { createUI } from './ui.js';
 import { createLocalInput, createPlayerInput } from './input.js';
 import { createNet } from './net.js';
+import { createSound } from './sounds.js';
 
 const canvas = document.getElementById('board');
 const renderer = createRenderer(canvas);
+const sound = createSound();
+
+// Unlock the AudioContext on the first real user gesture (autoplay policy).
+function unlockAudioOnce() {
+  sound.unlock();
+  window.removeEventListener('keydown', unlockAudioOnce);
+  window.removeEventListener('pointerdown', unlockAudioOnce);
+}
+window.addEventListener('keydown', unlockAudioOnce);
+window.addEventListener('pointerdown', unlockAudioOnce);
 
 // ---------------------------------------------------------------------------
 // Mutable app state.
@@ -26,6 +38,7 @@ let localInput = null;        // createLocalInput()
 let localSlots = [];          // which slots are human-controlled here
 let acc = 0;                  // fixed-timestep accumulator
 let lastResultShown = false;  // have we already opened the result overlay?
+let localEventSnap = null;    // previous snapshot, for SFX/shake event detection
 
 // Online mode.
 let net = null;
@@ -38,6 +51,12 @@ let snapInterval = 1 / SNAPSHOT_HZ; // smoothing window, tied to server rate
 let lastSentInput = null;     // dedupe identical INPUT messages
 let onlineStarted = false;    // has START been received?
 let resultOpenOnline = false;
+let predicted = null;         // client-side predicted local player {x,y,dir,moving,speedPicks}
+
+// HUD refresh throttle (the DOM update itself is diff-based, but there is no
+// point doing the comparisons more than a dozen times a second).
+let lastHudAt = 0;
+const HUD_INTERVAL = 0.08; // seconds (~12.5 Hz)
 
 let lastFrame = performance.now();
 
@@ -45,6 +64,7 @@ let lastFrame = performance.now();
 // UI wiring.
 // ---------------------------------------------------------------------------
 const ui = createUI({
+  sound,
   onStartLocal: startLocal,
   onCreateRoom: (name, wins) => connectAndJoin(name, '', wins),
   onJoinRoom: (name, code) => connectAndJoin(name, code, 3),
@@ -72,9 +92,13 @@ function startLocal(numPlayers, winsToWin) {
   localInput.attach();
   acc = 0;
   lastResultShown = false;
+  localEventSnap = null;
 
   mode = 'local';
+  lastHudAt = HUD_INTERVAL; // refresh the HUD on the very first frame
+  ui.resetHud();
   ui.show('hud');
+  sound.play('start');
 }
 
 function stepLocal(frameDt) {
@@ -95,8 +119,11 @@ function stepLocal(frameDt) {
   }
 
   const snap = toSnapshot(localGame);
+  detectEvents(localEventSnap, snap);
+  localEventSnap = snap;
+
   renderer.draw(snap, { localSlots });
-  ui.updateHud(snap, localSlots);
+  updateHudThrottled(snap, localSlots, frameDt);
 
   // Show the result overlay once when a round/match resolves; keep rendering.
   if ((snap.phase === 'roundover' || snap.phase === 'matchover') && !lastResultShown) {
@@ -129,13 +156,21 @@ function connectAndJoin(name, room, winsToWin) {
       onlineStarted = true;
       resultOpenOnline = false;
       lastSentInput = null;
+      predicted = null;
+      lastHudAt = HUD_INTERVAL; // refresh the HUD on the very first frame
       if (onlineInput) onlineInput.attach();
+      ui.resetHud();
       ui.show('hud');
+      sound.play('start');
     },
     onSnapshot: (snap) => {
+      // Detect SFX/shake events against the previously-held server snapshot,
+      // then advance the interpolation buffer and reconcile our prediction.
+      detectEvents(curSnap, snap);
       prevSnap = curSnap || snap;
       curSnap = snap;
       snapRecvTime = performance.now();
+      reconcilePrediction(snap);
     },
     onError: (msg) => {
       ui.showError(msg);
@@ -166,7 +201,7 @@ function connectAndJoin(name, room, winsToWin) {
   }, 100);
 }
 
-function tickOnline() {
+function tickOnline(frameDt) {
   // Send our input each frame, but only when it actually changed.
   if (onlineStarted && onlineInput && net) {
     const inp = onlineInput.current();
@@ -178,13 +213,40 @@ function tickOnline() {
 
   if (!curSnap) return;
 
-  // Interpolate player positions between the previous and current snapshots
-  // for smooth motion despite the 30 Hz server tick.
+  // Advance the client-side prediction for our own player so it reacts to input
+  // instantly instead of after a full server round-trip.
+  const sp = curSnap.players.find((p) => p.slot === mySlot);
+  const inp = onlineInput ? onlineInput.current() : null;
+  if (sp && sp.alive && inp && curSnap.phase === 'playing') {
+    if (!predicted) {
+      predicted = { x: sp.x, y: sp.y, dir: sp.dir, moving: sp.moving, speedPicks: sp.speedPicks };
+    }
+    predicted.speedPicks = sp.speedPicks;
+    // Mirror the engine's pass rule: a player may walk through any bomb tile
+    // their collision box still overlaps (i.e. a bomb they just placed and are
+    // stepping off). Using the box — not just the centre tile — keeps prediction
+    // from snagging on a freshly-dropped bomb the way the server doesn't.
+    predicted.passBombs = passSet(predicted.x, predicted.y, curSnap.bombs);
+    predictMove(curSnap.grid, curSnap.bombs, predicted, inp, Math.min(frameDt, 0.05));
+  } else {
+    predicted = null;
+  }
+
+  // Interpolate other players between the previous and current snapshots for
+  // smooth motion despite the 30 Hz server tick; our own player is overridden
+  // with the predicted position below.
   const t = Math.min(1, (performance.now() - snapRecvTime) / (snapInterval * 1000));
   const render = interpolate(prevSnap, curSnap, t);
+  if (predicted) {
+    render.players = render.players.map((p) => (
+      p.slot === mySlot
+        ? { ...p, x: predicted.x, y: predicted.y, dir: predicted.dir, moving: predicted.moving }
+        : p
+    ));
+  }
 
   renderer.draw(render, { localSlots: [mySlot] });
-  ui.updateHud(render, [mySlot]);
+  updateHudThrottled(render, [mySlot], frameDt);
 
   const phase = curSnap.phase;
   if ((phase === 'roundover' || phase === 'matchover') && !resultOpenOnline) {
@@ -195,6 +257,39 @@ function tickOnline() {
     resultOpenOnline = false;
     ui.show('hud');
   }
+}
+
+// Pull the prediction back toward the authoritative server position. A big gap
+// (death, sudden-death wall, a mispredicted collision) snaps hard; small drift
+// is corrected gently so steady-state movement doesn't rubber-band.
+function reconcilePrediction(snap) {
+  if (!predicted) return;
+  const sp = snap.players.find((p) => p.slot === mySlot);
+  if (!sp) return;
+  if (!sp.alive) { predicted = null; return; }
+  const dx = sp.x - predicted.x;
+  const dy = sp.y - predicted.y;
+  if (Math.hypot(dx, dy) > 0.9) {
+    predicted.x = sp.x; predicted.y = sp.y;
+  } else {
+    predicted.x += dx * 0.3;
+    predicted.y += dy * 0.3;
+  }
+}
+
+// Bomb tiles the predicted player's collision box overlaps — these are the
+// bombs they're allowed to walk through (matches engine PLAYER_HALF = 0.34).
+const PLAYER_HALF = 0.34;
+function passSet(x, y, bombs) {
+  const pass = new Set();
+  const minC = Math.floor(x - PLAYER_HALF), maxC = Math.floor(x + PLAYER_HALF);
+  const minR = Math.floor(y - PLAYER_HALF), maxR = Math.floor(y + PLAYER_HALF);
+  for (const b of bombs) {
+    if (b.col >= minC && b.col <= maxC && b.row >= minR && b.row <= maxR) {
+      pass.add(b.row * COLS + b.col);
+    }
+  }
+  return pass;
 }
 
 // Linearly blend only the player x/y/dir; everything else snaps to current.
@@ -219,8 +314,61 @@ function sameInput(a, b) {
 }
 
 // ===========================================================================
+// SOUND / SHAKE EVENT DETECTION
+// ===========================================================================
+// Both modes ultimately diff two consecutive snapshots; this keeps the audio
+// and screen-shake logic in one place and identical for local and online play.
+function detectEvents(prev, snap) {
+  if (!prev || !snap || prev === snap) return;
+
+  // New bombs (by stable id) -> placement blip. Keying on id (not col/row)
+  // catches a fresh bomb dropped on a tile that just detonated.
+  for (const b of snap.bombs) {
+    if (!prev.bombs.some((o) => o.id === b.id)) {
+      sound.play('place');
+    }
+  }
+
+  // New explosion centres -> detonation + screen shake.
+  let newCenters = 0;
+  for (const f of snap.flames) {
+    if (f.kind !== 'center') continue;
+    if (!prev.flames.some((o) => o.col === f.col && o.row === f.row && o.kind === 'center')) {
+      newCenters++;
+    }
+  }
+  if (newCenters > 0) {
+    sound.play('explode', { rate: 0.92 + Math.min(newCenters, 4) * 0.04 });
+    renderer.shake(Math.min(8 + newCenters * 3, 18));
+  }
+
+  // Powerup pickups -> any player's total upgrades increased.
+  for (const p of snap.players) {
+    const o = prev.players.find((q) => q.slot === p.slot);
+    if (!o) continue;
+    const before = o.maxBombs + o.range + o.speedPicks;
+    const after = p.maxBombs + p.range + p.speedPicks;
+    if (after > before) sound.play('pickup');
+    // Player just died.
+    if (o.alive && !p.alive) sound.play('death');
+  }
+
+  // Round / match resolution -> win or draw sting (fired once on transition).
+  if (prev.phase === 'playing' && snap.phase !== 'playing') {
+    sound.play(snap.winner === null || snap.winner === undefined ? 'draw' : 'win');
+  }
+}
+
+// ===========================================================================
 // SHARED FLOW
 // ===========================================================================
+function updateHudThrottled(snap, slots, frameDt) {
+  lastHudAt += frameDt;
+  if (lastHudAt < HUD_INTERVAL) return;
+  lastHudAt = 0;
+  ui.updateHud(snap, slots);
+}
+
 function onRestart() {
   if (mode === 'local' && localGame) {
     // Recreate a fresh match with the same player count / wins.
@@ -252,6 +400,7 @@ function teardownLocal() {
   localGame = null;
   localSlots = [];
   lastResultShown = false;
+  localEventSnap = null;
 }
 
 function teardownOnline() {
@@ -267,6 +416,7 @@ function resetOnlineState() {
   onlineStarted = false;
   resultOpenOnline = false;
   lastSentInput = null;
+  predicted = null;
 }
 
 // ===========================================================================
@@ -277,7 +427,7 @@ function frame(t) {
   lastFrame = t;
 
   if (mode === 'local') stepLocal(dt);
-  else if (mode === 'online') tickOnline();
+  else if (mode === 'online') tickOnline(dt);
   // menu: nothing to render on the canvas.
 
   requestAnimationFrame(frame);

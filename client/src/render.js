@@ -1,10 +1,27 @@
 // Canvas renderer for the Bomberman board.
 //
-// createRenderer(canvas) -> { resize(), draw(snap, { localSlots }) }
+// createRenderer(canvas) -> { resize(), draw(snap, { localSlots }), shake(magnitude) }
 //
 // The board is COLS x ROWS logical tiles. We compute an integer-ish tile size
 // that fits the viewport, centre the board, and draw everything in device
 // pixels (scaled for devicePixelRatio) so it stays crisp on HiDPI screens.
+//
+// PERFORMANCE MODEL
+// -----------------
+// The expensive parts of canvas rendering here are (a) re-stroking the whole
+// grid every frame and (b) toggling ctx.shadowBlur dozens of times per frame
+// (each shadowed draw is effectively a blur pass). Both of those belong to the
+// *static* terrain, which only changes on resize or when a brick is destroyed.
+//
+// So we cache two offscreen layers and blit them with a single drawImage each:
+//   - FLOOR layer:   checkerboard + faint grid lines + board backdrop/frame
+//                    glow. Rebuilt only on resize().
+//   - TERRAIN layer: solid pillars + bricks. Rebuilt only when snap.grid
+//                    actually changes (cheap signature compare) or on resize().
+//
+// Everything genuinely dynamic (powerups, bombs, flames, players) is still
+// drawn per frame, but we keep shadowBlur usage to a small handful of entities
+// and prefer pre-baked radial gradients for glow where it reads the same.
 
 import {
   COLS, ROWS, CELL, POWERUP, BOMB_FUSE, PLAYER_COLORS,
@@ -21,9 +38,35 @@ export function createRenderer(canvas) {
   let viewW = 0;
   let viewH = 0;
 
+  // Offscreen cached layers. We draw into these in CSS-pixel coordinates after
+  // scaling their context by dpr, so they render crisp at HiDPI and can be
+  // blitted 1:1 over the (also dpr-scaled) main context.
+  const floorCanvas = document.createElement('canvas');
+  const floorCtx = floorCanvas.getContext('2d');
+  const terrainCanvas = document.createElement('canvas');
+  const terrainCtx = terrainCanvas.getContext('2d');
+
+  // The terrain layer is keyed by a signature of the grid contents; when the
+  // signature is unchanged we skip the (relatively pricey) terrain rebuild.
+  let terrainSig = null;
+
   // A monotonic clock for animations (pulsing bombs, flame flicker, etc.).
   const startTime = performance.now();
   const now = () => (performance.now() - startTime) / 1000;
+
+  // ---- screen shake ---------------------------------------------------------
+  // `shakeAmt` is the current shake energy in CSS pixels; it decays every frame.
+  // `shakeFrame` is an internal counter that drives a deterministic pseudo-random
+  // offset so we never call Math.random per frame and the motion stays smooth.
+  let shakeAmt = 0;
+  let shakeFrame = 0;
+  const SHAKE_MAX = 18;          // hard cap so the board can't fly off-screen
+  const SHAKE_DECAY = 0.86;      // multiplicative per-frame decay
+
+  function shake(magnitude) {
+    // Accumulate energy but clamp; safe to call on every explosion.
+    shakeAmt = Math.min(SHAKE_MAX, shakeAmt + (magnitude || 0));
+  }
 
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -47,6 +90,20 @@ export function createRenderer(canvas) {
     const boardH = tile * ROWS;
     originX = Math.floor((viewW - boardW) / 2);
     originY = Math.floor(padTop + (availH - boardH) / 2);
+
+    // Size both offscreen layers to the full viewport in device pixels and
+    // scale their contexts so we can keep drawing in CSS-pixel coordinates.
+    for (const c of [floorCanvas, terrainCanvas]) {
+      c.width = canvas.width;
+      c.height = canvas.height;
+    }
+    floorCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    terrainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // The floor is fully determined by layout, so rebuild it now...
+    renderFloorLayer();
+    // ...and force the terrain layer to rebuild on the next draw().
+    terrainSig = null;
   }
 
   // ---- small drawing helpers ------------------------------------------------
@@ -71,83 +128,149 @@ export function createRenderer(canvas) {
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
-  // ---- terrain --------------------------------------------------------------
-
-  function drawFloor() {
-    for (let row = 0; row < ROWS; row++) {
-      for (let col = 0; col < COLS; col++) {
-        const x = px(col), y = py(row);
-        // Subtle checkerboard so motion is readable.
-        ctx.fillStyle = (col + row) % 2 === 0 ? '#10162a' : '#0d1322';
-        ctx.fillRect(x, y, tile, tile);
-      }
-    }
-    // Faint grid lines for that arcade-floor feel.
-    ctx.strokeStyle = 'rgba(120, 150, 220, 0.05)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let col = 0; col <= COLS; col++) {
-      ctx.moveTo(px(col) + 0.5, py(0));
-      ctx.lineTo(px(col) + 0.5, py(ROWS));
-    }
-    for (let row = 0; row <= ROWS; row++) {
-      ctx.moveTo(px(0), py(row) + 0.5);
-      ctx.lineTo(px(COLS), py(row) + 0.5);
-    }
-    ctx.stroke();
+  function getFont() {
+    return "'Segoe UI', system-ui, sans-serif";
   }
 
-  function drawSolid(col, row) {
+  // ---- static FLOOR layer (rebuilt only on resize) --------------------------
+
+  // Renders the board backdrop/frame glow, the checkerboard, and the faint grid
+  // lines into the floor offscreen canvas. The frame glow uses shadowBlur, but
+  // because it's baked here it costs nothing per frame.
+  function renderFloorLayer() {
+    const c = floorCtx;
+    c.clearRect(0, 0, viewW, viewH);
+
+    const boardW = tile * COLS, boardH = tile * ROWS;
+
+    // Board backdrop with a soft neon frame glow.
+    c.save();
+    c.shadowColor = 'rgba(63, 182, 255, 0.25)';
+    c.shadowBlur = 30;
+    c.fillStyle = '#0a0e1a';
+    roundRect(c, originX - 6, originY - 6, boardW + 12, boardH + 12, 14);
+    c.fill();
+    c.restore();
+
+    // Clip to the board so the checkerboard/grid stay inside the rounded arena.
+    c.save();
+    roundRect(c, originX, originY, boardW, boardH, 8);
+    c.clip();
+
+    // Subtle checkerboard so motion is readable.
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        c.fillStyle = (col + row) % 2 === 0 ? '#10162a' : '#0d1322';
+        c.fillRect(px(col), py(row), tile, tile);
+      }
+    }
+
+    // Faint grid lines for that arcade-floor feel.
+    c.strokeStyle = 'rgba(120, 150, 220, 0.05)';
+    c.lineWidth = 1;
+    c.beginPath();
+    for (let col = 0; col <= COLS; col++) {
+      c.moveTo(px(col) + 0.5, py(0));
+      c.lineTo(px(col) + 0.5, py(ROWS));
+    }
+    for (let row = 0; row <= ROWS; row++) {
+      c.moveTo(px(0), py(row) + 0.5);
+      c.lineTo(px(COLS), py(row) + 0.5);
+    }
+    c.stroke();
+
+    c.restore();
+  }
+
+  // ---- static TERRAIN layer (rebuilt only when the grid changes) ------------
+
+  // Cheap signature of the grid: only solids/bricks matter for terrain, and the
+  // grid is a flat int array, so a join is plenty fast for a 15x13 board and is
+  // far cheaper than rebuilding the bevelled tiles every frame.
+  function gridSignature(grid) {
+    // Include tile size so a resize (handled separately) or any layout drift
+    // also invalidates the cache.
+    let sig = tile + ':';
+    for (let i = 0; i < grid.length; i++) {
+      const v = grid[i];
+      // Only SOLID/BRICK affect the rendered terrain; collapse everything else.
+      sig += (v === CELL.SOLID || v === CELL.BRICK) ? v : '0';
+    }
+    return sig;
+  }
+
+  function renderTerrainLayer(grid) {
+    const c = terrainCtx;
+    c.clearRect(0, 0, viewW, viewH);
+
+    // Clip to the board so bevelled edges stay tidy at the arena border.
+    const boardW = tile * COLS, boardH = tile * ROWS;
+    c.save();
+    roundRect(c, originX, originY, boardW, boardH, 8);
+    c.clip();
+
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        const v = grid[row * COLS + col];
+        if (v === CELL.SOLID) drawSolid(c, col, row);
+        else if (v === CELL.BRICK) drawBrick(c, col, row);
+      }
+    }
+
+    c.restore();
+  }
+
+  function drawSolid(c, col, row) {
     const x = px(col), y = py(row);
     const t = tile;
     // 3D-ish bevelled pillar.
-    ctx.fillStyle = '#243152';
-    roundRect(ctx, x + 1, y + 1, t - 2, t - 2, 5);
-    ctx.fill();
+    c.fillStyle = '#243152';
+    roundRect(c, x + 1, y + 1, t - 2, t - 2, 5);
+    c.fill();
     // top-left highlight
-    ctx.fillStyle = 'rgba(150, 180, 255, 0.18)';
-    roundRect(ctx, x + 2, y + 2, t - 4, (t - 4) * 0.45, 4);
-    ctx.fill();
+    c.fillStyle = 'rgba(150, 180, 255, 0.18)';
+    roundRect(c, x + 2, y + 2, t - 4, (t - 4) * 0.45, 4);
+    c.fill();
     // bottom shadow
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
-    roundRect(ctx, x + 2, y + t * 0.6, t - 4, t * 0.36, 4);
-    ctx.fill();
+    c.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    roundRect(c, x + 2, y + t * 0.6, t - 4, t * 0.36, 4);
+    c.fill();
     // crisp edge
-    ctx.strokeStyle = 'rgba(120, 150, 220, 0.35)';
-    ctx.lineWidth = 1;
-    roundRect(ctx, x + 1.5, y + 1.5, t - 3, t - 3, 5);
-    ctx.stroke();
+    c.strokeStyle = 'rgba(120, 150, 220, 0.35)';
+    c.lineWidth = 1;
+    roundRect(c, x + 1.5, y + 1.5, t - 3, t - 3, 5);
+    c.stroke();
   }
 
-  function drawBrick(col, row) {
+  function drawBrick(c, col, row) {
     const x = px(col), y = py(row);
     const t = tile;
-    ctx.fillStyle = '#6b4630';
-    roundRect(ctx, x + 1, y + 1, t - 2, t - 2, 4);
-    ctx.fill();
+    c.fillStyle = '#6b4630';
+    roundRect(c, x + 1, y + 1, t - 2, t - 2, 4);
+    c.fill();
     // brick courses
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.28)';
-    ctx.lineWidth = Math.max(1, t * 0.045);
+    c.strokeStyle = 'rgba(0, 0, 0, 0.28)';
+    c.lineWidth = Math.max(1, t * 0.045);
     const rows = 3;
     const rh = (t - 2) / rows;
-    ctx.beginPath();
+    c.beginPath();
     for (let i = 1; i < rows; i++) {
-      ctx.moveTo(x + 2, y + 1 + i * rh);
-      ctx.lineTo(x + t - 2, y + 1 + i * rh);
+      c.moveTo(x + 2, y + 1 + i * rh);
+      c.lineTo(x + t - 2, y + 1 + i * rh);
     }
     // offset vertical joints
     for (let i = 0; i < rows; i++) {
       const offset = i % 2 === 0 ? t * 0.5 : t * 0.25;
-      ctx.moveTo(x + offset, y + 1 + i * rh);
-      ctx.lineTo(x + offset, y + 1 + (i + 1) * rh);
+      c.moveTo(x + offset, y + 1 + i * rh);
+      c.lineTo(x + offset, y + 1 + (i + 1) * rh);
     }
-    ctx.stroke();
+    c.stroke();
     // top highlight
-    ctx.fillStyle = 'rgba(255, 200, 150, 0.14)';
-    ctx.fillRect(x + 2, y + 2, t - 4, Math.max(1, t * 0.08));
+    c.fillStyle = 'rgba(255, 200, 150, 0.14)';
+    c.fillRect(x + 2, y + 2, t - 4, Math.max(1, t * 0.08));
   }
 
-  // ---- powerups -------------------------------------------------------------
+  // ---- powerups (dynamic) ---------------------------------------------------
 
   function drawPowerup(col, row, kind) {
     const x = px(col) + tile / 2;
@@ -161,7 +284,8 @@ export function createRenderer(canvas) {
     else if (kind === POWERUP.RANGE) { color = '#ffcf3f'; glyph = 'range'; }
     else { color = '#5dd95d'; glyph = 'speed'; }
 
-    // glowing pill
+    // glowing pill (one shadowBlur use per powerup; there are only a few on
+    // screen at once, so this stays cheap)
     ctx.save();
     ctx.shadowColor = color;
     ctx.shadowBlur = tile * 0.4;
@@ -222,7 +346,7 @@ export function createRenderer(canvas) {
     ctx.restore();
   }
 
-  // ---- bombs ----------------------------------------------------------------
+  // ---- bombs (dynamic) ------------------------------------------------------
 
   function drawBomb(b) {
     const x = px(b.col) + tile / 2;
@@ -271,7 +395,7 @@ export function createRenderer(canvas) {
     ctx.restore();
   }
 
-  // ---- flames ---------------------------------------------------------------
+  // ---- flames (dynamic, additive) -------------------------------------------
 
   function drawFlame(f) {
     const x = px(f.col);
@@ -293,6 +417,7 @@ export function createRenderer(canvas) {
     }
 
     const cx = x + t / 2, cy = y + t / 2;
+    // Additive radial gradient gives the glow without needing shadowBlur.
     const grad = ctx.createRadialGradient(cx, cy, t * 0.05, cx, cy, t * 0.7);
     grad.addColorStop(0, `rgba(255, 255, 230, ${0.95 * flick})`);
     grad.addColorStop(0.35, `rgba(255, 180, 70, ${0.85 * flick})`);
@@ -314,7 +439,7 @@ export function createRenderer(canvas) {
     ctx.restore();
   }
 
-  // ---- players --------------------------------------------------------------
+  // ---- players (dynamic) ----------------------------------------------------
 
   function drawPlayer(p, isLocal) {
     const x = px(0) + p.x * tile; // p.x already includes the +0.5 centre offset
@@ -403,47 +528,50 @@ export function createRenderer(canvas) {
     ctx.restore();
   }
 
-  function getFont() {
-    return "'Segoe UI', system-ui, sans-serif";
-  }
-
   // ---- frame ----------------------------------------------------------------
 
   function draw(snap, opts = {}) {
     const localSlots = opts.localSlots || [];
 
-    // Reset transform then scale to device pixels.
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, viewW, viewH);
+    // Compute the current shake offset before resetting the transform. We use a
+    // deterministic counter-driven jitter (no Math.random) and decay the energy
+    // afterwards. Offsets are clamped to the live energy so they never exceed
+    // SHAKE_MAX pixels and can't throw the board off-screen.
+    let sx = 0, sy = 0;
+    if (shakeAmt > 0.1) {
+      shakeFrame++;
+      // Two out-of-phase sinusoids give a lively, non-repeating-looking jitter.
+      sx = Math.sin(shakeFrame * 1.7) * shakeAmt;
+      sy = Math.cos(shakeFrame * 2.3) * shakeAmt;
+      shakeAmt *= SHAKE_DECAY;
+    } else {
+      shakeAmt = 0;
+    }
+
+    // Reset transform then scale to device pixels, folding in the shake offset.
+    ctx.setTransform(dpr, 0, 0, dpr, sx * dpr, sy * dpr);
+    ctx.clearRect(-sx, -sy, viewW, viewH);
 
     if (!snap) return;
 
-    // board backdrop / frame glow
-    const boardW = tile * COLS, boardH = tile * ROWS;
-    ctx.save();
-    ctx.shadowColor = 'rgba(63, 182, 255, 0.25)';
-    ctx.shadowBlur = 30;
-    ctx.fillStyle = '#0a0e1a';
-    roundRect(ctx, originX - 6, originY - 6, boardW + 12, boardH + 12, 14);
-    ctx.fill();
-    ctx.restore();
+    // Static layers: one drawImage each. The offscreen canvases are full
+    // viewport-sized and already in device pixels, so we blit them at 0,0 in the
+    // (dpr-scaled) coordinate space.
+    ctx.drawImage(floorCanvas, 0, 0, viewW, viewH);
 
-    // clip to the board so glows don't bleed outside the arena
+    // Rebuild terrain only when the grid contents (or tile size) changed.
+    const sig = gridSignature(snap.grid);
+    if (sig !== terrainSig) {
+      renderTerrainLayer(snap.grid);
+      terrainSig = sig;
+    }
+    ctx.drawImage(terrainCanvas, 0, 0, viewW, viewH);
+
+    // Clip dynamic entities to the board so glows don't bleed past the arena.
+    const boardW = tile * COLS, boardH = tile * ROWS;
     ctx.save();
     roundRect(ctx, originX, originY, boardW, boardH, 8);
     ctx.clip();
-
-    drawFloor();
-
-    // terrain
-    const grid = snap.grid;
-    for (let row = 0; row < ROWS; row++) {
-      for (let col = 0; col < COLS; col++) {
-        const c = grid[row * COLS + col];
-        if (c === CELL.SOLID) drawSolid(col, row);
-        else if (c === CELL.BRICK) drawBrick(col, row);
-      }
-    }
 
     // loose powerups
     for (const pu of snap.powerups) drawPowerup(pu.col, pu.row, pu.kind);
@@ -454,7 +582,7 @@ export function createRenderer(canvas) {
     // flames (drawn over bombs/terrain)
     for (const f of snap.flames) drawFlame(f);
 
-    // players — draw dead ones first so living ghosts sit behind the action
+    // players — draw dead ones first so living players sit in front.
     const players = [...snap.players].sort((a, b) => (a.alive === b.alive ? 0 : a.alive ? 1 : -1));
     for (const p of players) {
       drawPlayer(p, localSlots.includes(p.slot));
@@ -466,5 +594,5 @@ export function createRenderer(canvas) {
   // initial layout
   resize();
 
-  return { resize, draw };
+  return { resize, draw, shake };
 }
