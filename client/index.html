@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0f1a" />
+  <title>Bomberman — Neon Arena</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- The game board. The renderer scales this for devicePixelRatio. -->
+    <canvas id="board"></canvas>
+
+    <!-- ============================ MAIN MENU ============================ -->
+    <section class="screen" id="screen-menu" data-screen="menu">
+      <div class="panel menu-panel">
+        <h1 class="logo">BOMB<span class="logo-accent">ER</span>MAN</h1>
+        <p class="tagline">Neon Arena — 2&ndash;4 Spieler</p>
+
+        <div class="menu-buttons">
+          <button class="btn btn-primary" id="btn-goto-local">Lokal spielen</button>
+          <button class="btn btn-secondary" id="btn-goto-online">Online spielen</button>
+        </div>
+
+        <div class="legend">
+          <h3>Steuerung (lokal)</h3>
+          <table class="legend-table">
+            <thead>
+              <tr><th>Spieler</th><th>Bewegen</th><th>Bombe</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><span class="dot" style="--c:#ff5470"></span>Rot</td><td>W A S D</td><td>Leertaste</td></tr>
+              <tr><td><span class="dot" style="--c:#3fb6ff"></span>Blau</td><td>Pfeiltasten</td><td>Enter</td></tr>
+              <tr><td><span class="dot" style="--c:#5dd95d"></span>Grün</td><td>I J K L</td><td>U</td></tr>
+              <tr><td><span class="dot" style="--c:#ffcf3f"></span>Gelb</td><td>T F G H</td><td>R</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="footer-note">Lege Bomben, sprenge Mauern, sammle Power-ups &amp; sei der Letzte, der steht.</p>
+      </div>
+    </section>
+
+    <!-- =========================== LOCAL SETUP =========================== -->
+    <section class="screen" id="screen-local" data-screen="local">
+      <div class="panel">
+        <h2>Lokales Spiel</h2>
+
+        <div class="field">
+          <label>Anzahl Spieler</label>
+          <div class="seg" id="seg-players" role="group" aria-label="Anzahl Spieler">
+            <button class="seg-btn" data-val="2">2</button>
+            <button class="seg-btn is-active" data-val="3">3</button>
+            <button class="seg-btn" data-val="4">4</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Runden zum Sieg (Best of)</label>
+          <div class="seg" id="seg-wins-local" role="group" aria-label="Runden zum Sieg">
+            <button class="seg-btn" data-val="1">1</button>
+            <button class="seg-btn is-active" data-val="3">3</button>
+            <button class="seg-btn" data-val="5">5</button>
+          </div>
+        </div>
+
+        <div class="row-buttons">
+          <button class="btn btn-ghost" data-back>Zurück</button>
+          <button class="btn btn-primary" id="btn-start-local">Start</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================== ONLINE LOBBY ========================== -->
+    <section class="screen" id="screen-online" data-screen="online">
+      <div class="panel">
+        <h2>Online spielen</h2>
+
+        <!-- Connection / setup sub-view (before we are in a room) -->
+        <div id="online-setup">
+          <div class="field">
+            <label for="inp-name">Dein Name</label>
+            <input class="text-input" id="inp-name" type="text" maxlength="12" placeholder="Spieler" autocomplete="off" />
+          </div>
+
+          <div class="online-actions">
+            <button class="btn btn-primary" id="btn-create-room">Raum erstellen</button>
+            <div class="or">oder</div>
+            <div class="join-row">
+              <input class="text-input code-input" id="inp-code" type="text" maxlength="4" placeholder="CODE" autocomplete="off" />
+              <button class="btn btn-secondary" id="btn-join-room">Beitreten</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Runden zum Sieg (nur als Host)</label>
+            <div class="seg" id="seg-wins-online" role="group" aria-label="Runden zum Sieg">
+              <button class="seg-btn" data-val="1">1</button>
+              <button class="seg-btn is-active" data-val="3">3</button>
+              <button class="seg-btn" data-val="5">5</button>
+            </div>
+          </div>
+
+          <div class="row-buttons">
+            <button class="btn btn-ghost" data-back>Zurück</button>
+          </div>
+        </div>
+
+        <!-- Room sub-view (after JOINED) -->
+        <div id="online-room" hidden>
+          <div class="room-code-box">
+            <span class="room-code-label">Raumcode</span>
+            <span class="room-code" id="room-code-value">----</span>
+            <button class="btn btn-tiny" id="btn-copy-code" title="Kopieren">Kopieren</button>
+          </div>
+
+          <ul class="player-list" id="lobby-players"></ul>
+
+          <div class="row-buttons">
+            <button class="btn btn-ghost" id="btn-leave-room">Verlassen</button>
+            <button class="btn btn-secondary" id="btn-ready">Bereit</button>
+            <button class="btn btn-primary" id="btn-start-online" disabled hidden>Spiel starten</button>
+          </div>
+          <p class="lobby-hint" id="lobby-hint"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== HUD ============================== -->
+    <section class="screen screen-overlayless" id="screen-hud" data-screen="hud">
+      <div class="hud-bar">
+        <div class="hud-players" id="hud-players"></div>
+        <div class="hud-center">
+          <div class="hud-round" id="hud-round">Runde 1</div>
+          <div class="hud-timer" id="hud-timer"></div>
+        </div>
+        <button class="btn btn-ghost btn-tiny" id="btn-quit">Beenden</button>
+      </div>
+      <div class="sudden-death-banner" id="sudden-death" hidden>⚠ SUDDEN DEATH ⚠</div>
+    </section>
+
+    <!-- ============================= RESULT ============================= -->
+    <section class="screen" id="screen-result" data-screen="result">
+      <div class="panel result-panel">
+        <h2 id="result-title">Runde vorbei</h2>
+        <div class="result-winner" id="result-winner"></div>
+        <div class="result-scores" id="result-scores"></div>
+        <div class="row-buttons">
+          <button class="btn btn-ghost" id="btn-result-menu">Menü</button>
+          <button class="btn btn-primary" id="btn-rematch">Revanche</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================= TOAST ============================= -->
+    <div class="toast" id="toast" hidden></div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
