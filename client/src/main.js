@@ -44,10 +44,8 @@ let localEventSnap = null;    // previous snapshot, for SFX/shake event detectio
 let net = null;
 let onlineInput = null;       // createPlayerInput()
 let mySlot = -1;              // our network slot (from JOINED)
-let prevSnap = null;          // for interpolation
-let curSnap = null;
-let snapRecvTime = 0;         // performance.now() when curSnap arrived
-let snapInterval = 1 / SNAPSHOT_HZ; // smoothing window, tied to server rate
+let curSnap = null;           // latest authoritative snapshot (events, prediction, dynamic render)
+let snapBuf = [];             // recent snapshots [{ snap, at }] for jitter-tolerant interpolation
 let lastSentInput = null;     // dedupe identical INPUT messages
 let onlineStarted = false;    // has START been received?
 let resultOpenOnline = false;
@@ -59,6 +57,13 @@ let predBombHeld = false;     // bomb-button edge state for local bomb predictio
 // point doing the comparisons more than a dozen times a second).
 let lastHudAt = 0;
 const HUD_INTERVAL = 0.08; // seconds (~12.5 Hz)
+
+// Render OTHER players this far in the past so two buffered snapshots always
+// bracket the render time — this absorbs network jitter / late packets so
+// enemies glide smoothly instead of stuttering or teleporting. (Online only;
+// local mode steps the engine live and needs no interpolation.) Our own player
+// is client-predicted, so it stays instant despite this delay.
+const INTERP_DELAY = (1000 / SNAPSHOT_HZ) * 2.6; // ms (~87 ms at 30 Hz)
 
 let lastFrame = performance.now();
 
@@ -167,11 +172,11 @@ function connectAndJoin(name, room, winsToWin) {
     },
     onSnapshot: (snap) => {
       // Detect SFX/shake events against the previously-held server snapshot,
-      // then advance the interpolation buffer and reconcile our prediction.
+      // then buffer this one for interpolation and reconcile our prediction.
       detectEvents(curSnap, snap);
-      prevSnap = curSnap || snap;
       curSnap = snap;
-      snapRecvTime = performance.now();
+      snapBuf.push({ snap, at: performance.now() });
+      if (snapBuf.length > 40) snapBuf.shift(); // keep ~1.3 s of history, plenty
       reconcilePrediction(snap);
     },
     onError: (msg) => {
@@ -250,18 +255,14 @@ function tickOnline(frameDt) {
     predBombHeld = false;
   }
 
-  // Interpolate other players between the previous and current snapshots for
-  // smooth motion despite the 30 Hz server tick; our own player is overridden
-  // with the predicted position below.
-  const t = Math.min(1, (performance.now() - snapRecvTime) / (snapInterval * 1000));
-  const render = interpolate(prevSnap, curSnap, t);
+  // Build the render view: other players interpolated from the buffered
+  // snapshots (smooth despite jitter), our own player from the prediction.
+  const players = renderPlayers();
   if (predicted) {
-    render.players = render.players.map((p) => (
-      p.slot === mySlot
-        ? { ...p, x: predicted.x, y: predicted.y, dir: predicted.dir, moving: predicted.moving }
-        : p
-    ));
+    const me = players.find((p) => p.slot === mySlot);
+    if (me) { me.x = predicted.x; me.y = predicted.y; me.dir = predicted.dir; me.moving = predicted.moving; }
   }
+  const render = { ...curSnap, players };
 
   renderer.draw(render, { localSlots: [mySlot] });
   updateHudThrottled(render, [mySlot], frameDt);
@@ -298,19 +299,42 @@ function reconcilePrediction(snap) {
   }
 }
 
-// Linearly blend only the player x/y/dir; everything else snaps to current.
-function interpolate(a, b, t) {
-  if (!a || a === b) return b;
-  const players = b.players.map((pb) => {
-    const pa = a.players.find((q) => q.slot === pb.slot);
-    if (!pa) return pb;
+// Interpolated player view rendered INTERP_DELAY ms in the past: find the two
+// buffered snapshots that bracket that time and linearly blend positions between
+// them. Robust to variable / late snapshot arrival (no freeze-then-jump). Stats
+// come from the latest snapshot; only x/y/dir/moving are interpolated.
+function renderPlayers() {
+  const base = curSnap.players;
+  if (snapBuf.length < 2) return base.map((p) => ({ ...p }));
+
+  const target = performance.now() - INTERP_DELAY;
+  const first = snapBuf[0], last = snapBuf[snapBuf.length - 1];
+  let a = last, b = last;
+  if (target <= first.at) {
+    a = b = first;                       // not enough history yet
+  } else if (target < last.at) {
+    for (let i = 0; i < snapBuf.length - 1; i++) {
+      if (snapBuf[i].at <= target && target <= snapBuf[i + 1].at) {
+        a = snapBuf[i]; b = snapBuf[i + 1]; break;
+      }
+    }
+  } // else target >= last.at -> starved: hold the latest (a = b = last)
+
+  const span = b.at - a.at;
+  const f = span > 0 ? (target - a.at) / span : 1;
+
+  return base.map((p) => {
+    const pa = a.snap.players.find((q) => q.slot === p.slot);
+    const pb = b.snap.players.find((q) => q.slot === p.slot);
+    if (!pa || !pb) return { ...p };
     return {
-      ...pb,
-      x: pa.x + (pb.x - pa.x) * t,
-      y: pa.y + (pb.y - pa.y) * t,
+      ...p, // latest stats (score / shield / alive / ...)
+      x: pa.x + (pb.x - pa.x) * f,
+      y: pa.y + (pb.y - pa.y) * f,
+      dir: pb.dir,
+      moving: pb.moving,
     };
   });
-  return { ...b, players };
 }
 
 function sameInput(a, b) {
@@ -400,7 +424,7 @@ function backToMenu() {
   teardownOnline();
   mode = 'menu';
   curSnap = null;
-  prevSnap = null;
+  snapBuf = [];
   ui.resetOnline();
   ui.show('menu');
   // Clear the board.
@@ -424,8 +448,8 @@ function teardownOnline() {
 
 function resetOnlineState() {
   mySlot = -1;
-  prevSnap = null;
   curSnap = null;
+  snapBuf = [];
   onlineStarted = false;
   resultOpenOnline = false;
   lastSentInput = null;

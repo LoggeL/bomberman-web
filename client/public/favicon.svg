@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <radialGradient id="body" cx="38%" cy="34%" r="70%">
+      <stop offset="0%" stop-color="#3a3f55"/>
+      <stop offset="100%" stop-color="#12141f"/>
+    </radialGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#16203a"/>
+      <stop offset="100%" stop-color="#0a0e1a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded arcade-tile backdrop -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)" stroke="#3fb6ff" stroke-opacity="0.4" stroke-width="2"/>
+
+  <!-- bomb body -->
+  <circle cx="30" cy="38" r="18" fill="url(#body)"/>
+  <!-- glossy glint -->
+  <circle cx="24" cy="31" r="4.2" fill="#ffffff" fill-opacity="0.55"/>
+
+  <!-- fuse -->
+  <path d="M42 26 Q48 21 45 15" fill="none" stroke="#caa15a" stroke-width="3.2" stroke-linecap="round"/>
+  <!-- spark -->
+  <circle cx="45" cy="14" r="5.2" fill="#ffd27a"/>
+  <circle cx="45" cy="14" r="2.6" fill="#fff4d6"/>
+</svg>
