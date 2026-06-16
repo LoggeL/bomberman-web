@@ -202,12 +202,15 @@ export function createUI(callbacks = {}) {
           <span title="Bomben">💣<b>${p.maxBombs}</b></span>
           <span title="Reichweite">🔥<b>${p.range}</b></span>
           <span title="Tempo">⚡<b>${p.speedPicks}</b></span>
+          <span title="Schild">🛡<b>${p.shield}</b></span>
+          <span class="hc-badges" title="Fähigkeiten"></span>
         </div>`;
       const bs = card.querySelectorAll('.hc-stats b');
       hudCards.set(p.slot, {
         card,
         scoreEl: card.querySelector('.hc-score'),
-        bombsEl: bs[0], rangeEl: bs[1], speedEl: bs[2],
+        bombsEl: bs[0], rangeEl: bs[1], speedEl: bs[2], shieldEl: bs[3],
+        badgesEl: card.querySelector('.hc-badges'),
         dead: false,
       });
       hudPlayers.appendChild(card);
@@ -233,6 +236,9 @@ export function createUI(callbacks = {}) {
       const mb = String(p.maxBombs); if (c.bombsEl.textContent !== mb) c.bombsEl.textContent = mb;
       const rg = String(p.range);    if (c.rangeEl.textContent !== rg) c.rangeEl.textContent = rg;
       const sp = String(p.speedPicks); if (c.speedEl.textContent !== sp) c.speedEl.textContent = sp;
+      const sh = String(p.shield);   if (c.shieldEl.textContent !== sh) c.shieldEl.textContent = sh;
+      const badges = (p.ghost ? '👻' : '') + (p.pierce ? '💥' : '');
+      if (c.badgesEl.textContent !== badges) c.badgesEl.textContent = badges;
       if (c.dead !== !p.alive) { c.dead = !p.alive; c.card.classList.toggle('dead', !p.alive); }
     }
 

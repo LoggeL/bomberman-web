@@ -187,6 +187,12 @@ export function createSound() {
     tick(t0) {
       tone('square', 988, 988, t0, 0.09, 0.2);
     },
+    // A shield absorbs a hit: bright metallic "ting" over a soft thud.
+    shield(t0) {
+      tone('triangle', 1320, 1760, t0, 0.18, 0.22);
+      tone('sine', 440, 220, t0, 0.16, 0.18);
+      noise(t0, 0.08, 0.12, 2600);
+    },
   };
 
   // -------------------------------------------------------------------------

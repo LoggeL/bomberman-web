@@ -282,7 +282,10 @@ export function createRenderer(canvas) {
     let color, glyph;
     if (kind === POWERUP.BOMB) { color = '#ff5470'; glyph = 'bomb'; }
     else if (kind === POWERUP.RANGE) { color = '#ffcf3f'; glyph = 'range'; }
-    else { color = '#5dd95d'; glyph = 'speed'; }
+    else if (kind === POWERUP.SPEED) { color = '#5dd95d'; glyph = 'speed'; }
+    else if (kind === POWERUP.GHOST) { color = '#b98cff'; glyph = 'ghost'; }
+    else if (kind === POWERUP.PIERCE) { color = '#ff8a3f'; glyph = 'pierce'; }
+    else { color = '#3fe0ff'; glyph = 'shield'; }
 
     // glowing pill (one shadowBlur use per powerup; there are only a few on
     // screen at once, so this stays cheap)
@@ -331,7 +334,7 @@ export function createRenderer(canvas) {
         ctx.lineTo(dx * a + dy * a * 0.3 - dx * a * 0.3, dy * a - dx * a * 0.3 - dy * a * 0.3);
       }
       ctx.stroke();
-    } else {
+    } else if (glyph === 'speed') {
       // lightning bolt
       ctx.beginPath();
       ctx.moveTo(r * 0.15, -r * 0.55);
@@ -340,6 +343,45 @@ export function createRenderer(canvas) {
       ctx.lineTo(-r * 0.15, r * 0.55);
       ctx.lineTo(r * 0.4, -r * 0.1);
       ctx.lineTo(0, -r * 0.1);
+      ctx.closePath();
+      ctx.fill();
+    } else if (glyph === 'ghost') {
+      // little ghost silhouette + punched-out eyes
+      const gr = r * 0.52;
+      ctx.beginPath();
+      ctx.arc(0, -r * 0.02, gr, Math.PI, 0);  // rounded head
+      ctx.lineTo(gr, r * 0.5);
+      ctx.lineTo(gr * 0.5, r * 0.3);
+      ctx.lineTo(0, r * 0.5);
+      ctx.lineTo(-gr * 0.5, r * 0.3);
+      ctx.lineTo(-gr, r * 0.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(8, 11, 20, 0.95)';
+      for (const sx of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(sx * gr * 0.38, -r * 0.05, gr * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (glyph === 'pierce') {
+      // double chevron » suggesting a blast tearing through
+      ctx.lineWidth = Math.max(2, tile * 0.07);
+      for (const ox of [-r * 0.22, r * 0.22]) {
+        ctx.beginPath();
+        ctx.moveTo(ox - r * 0.22, -r * 0.42);
+        ctx.lineTo(ox + r * 0.28, 0);
+        ctx.lineTo(ox - r * 0.22, r * 0.42);
+        ctx.stroke();
+      }
+    } else {
+      // shield crest
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 0.62);
+      ctx.lineTo(r * 0.52, -r * 0.34);
+      ctx.lineTo(r * 0.52, r * 0.12);
+      ctx.quadraticCurveTo(r * 0.52, r * 0.52, 0, r * 0.66);
+      ctx.quadraticCurveTo(-r * 0.52, r * 0.52, -r * 0.52, r * 0.12);
+      ctx.lineTo(-r * 0.52, -r * 0.34);
       ctx.closePath();
       ctx.fill();
     }
@@ -449,7 +491,9 @@ export function createRenderer(canvas) {
     const [cr, cg, cb] = hexToRgb(color);
 
     ctx.save();
-    if (!p.alive) ctx.globalAlpha = 0.28; // ghost when dead
+    if (!p.alive) ctx.globalAlpha = 0.28;                 // faded when dead
+    else if (p.invuln > 0) ctx.globalAlpha = 0.45 + 0.4 * Math.abs(Math.sin(now() * 22)); // i-frame flicker
+    else if (p.ghost) ctx.globalAlpha = 0.6;              // see-through while wallpassing
 
     // soft shadow on the floor
     ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
@@ -465,6 +509,19 @@ export function createRenderer(canvas) {
       ctx.shadowBlur = tile * 0.4;
       ctx.beginPath();
       ctx.arc(x, y + r * 0.85, r * 1.05, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // shield bubble — cyan ring, thicker with more charges, gently pulsing
+    if (p.alive && p.shield > 0) {
+      const pulse = 0.6 + 0.4 * Math.sin(now() * 6);
+      ctx.strokeStyle = `rgba(63, 224, 255, ${0.45 + 0.35 * pulse})`;
+      ctx.lineWidth = Math.max(1.5, tile * 0.04 * Math.min(p.shield, 3));
+      ctx.shadowColor = '#3fe0ff';
+      ctx.shadowBlur = tile * 0.3;
+      ctx.beginPath();
+      ctx.arc(x, y, r * 1.28, 0, Math.PI * 2);
       ctx.stroke();
       ctx.shadowBlur = 0;
     }

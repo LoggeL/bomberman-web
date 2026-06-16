@@ -297,6 +297,33 @@ body::before {
 }
 .footer-note { color: var(--text-dim); font-size: 13px; margin: 18px 0 0; line-height: 1.5; }
 
+/* ----------------------------- Power-ups legend -------------------------- */
+.powerups-legend { margin-top: 16px; }
+.pu-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px 14px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.pu-list li { display: flex; align-items: center; gap: 8px; }
+.pu-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px; height: 24px;
+  border-radius: 7px;
+  background: rgba(8, 11, 20, 0.7);
+  border: 1px solid var(--c);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--c) 45%, transparent);
+  font-size: 14px;
+  flex: none;
+}
+@media (max-width: 520px) { .pu-list { grid-template-columns: 1fr; } }
+
 /* --------------------------- Online lobby -------------------------------- */
 .online-actions { margin: 18px 0; }
 .or { text-align: center; color: var(--text-dim); margin: 14px 0; font-size: 13px; letter-spacing: 1px; }

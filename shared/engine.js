@@ -14,10 +14,11 @@ import {
   BOMB_FUSE, FLAME_TIME, BRICK_FILL, POWERUP_CHANCE,
   BASE_SPEED, SPEED_PER_PICKUP, MAX_SPEED_PICKUPS,
   START_BOMBS, START_RANGE, MAX_BOMBS, MAX_RANGE,
+  MAX_SHIELD, SHIELD_INVULN,
   SPAWNS, ROUND_END_DELAY, SUDDEN_DEATH_TIME,
 } from './constants.js';
 
-const PLAYER_HALF = 0.34; // half the player's collision box, in tiles
+const PLAYER_HALF = 0.34; // half the player's collision box, in tiles (death/pickup checks)
 
 // ---- seeded RNG (mulberry32) -------------------------------------------------
 function makeRng(seed) {
@@ -32,10 +33,6 @@ function makeRng(seed) {
 
 const key = (col, row) => row * COLS + col;
 const inBounds = (col, row) => col >= 0 && col < COLS && row >= 0 && row < ROWS;
-
-// Shared empty pass-set for callers (e.g. client prediction) that have no
-// bomb pass-through state. Never mutated.
-const EMPTY_SET = new Set();
 
 // ---- construction ------------------------------------------------------------
 
@@ -73,9 +70,16 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
       maxBombs: START_BOMBS,
       range: START_RANGE,
       speedPicks: 0,
+      ghost: false,    // wallpass: may walk through bricks
+      pierce: false,   // bombs tear through bricks
+      shield: 0,       // absorbs lethal hits
+      invuln: 0,       // seconds of i-frames remaining after a shield pop
       score: 0,
       bombHeld: false,
-      passBombs: new Set(), // bomb tiles this player may walk through
+      // Tile-step movement state: a player rests on a cell centre and glides one
+      // whole tile toward (tx, ty) while `stepping`.
+      stepping: false,
+      tx: 0, ty: 0,
       moving: false,
     });
   }
@@ -137,16 +141,24 @@ function generateRound(state) {
     p.dir = 'down';
     p.alive = true;
     p.bombHeld = false;
-    p.passBombs.clear();
+    p.stepping = false;
+    p.invuln = 0;
     p.moving = false;
+    // Note: collected upgrades (bombs/range/speed/ghost/pierce/shield) persist
+    // across rounds within a match — only per-round transient state resets here.
   }
 }
 
+// Weighted hidden-powerup roll. The common stat boosts stay most likely; the
+// flashy abilities (ghost / pierce / shield) are rarer treats.
 function weightedPowerup(rng) {
   const r = rng();
-  if (r < 0.42) return POWERUP.BOMB;
-  if (r < 0.80) return POWERUP.RANGE;
-  return POWERUP.SPEED;
+  if (r < 0.30) return POWERUP.BOMB;   // 30%
+  if (r < 0.54) return POWERUP.RANGE;  // 24%
+  if (r < 0.70) return POWERUP.SPEED;  // 16%
+  if (r < 0.82) return POWERUP.GHOST;  // 12%
+  if (r < 0.93) return POWERUP.PIERCE; // 11%
+  return POWERUP.SHIELD;               // 7%
 }
 
 // ---- per-player input --------------------------------------------------------
@@ -156,87 +168,85 @@ export function setInput(state, slot, input) {
   if (p) p._input = input;
 }
 
-// ---- collision ---------------------------------------------------------------
+// ---- movement (tile-by-tile grid stepping) -----------------------------------
 //
-// These are pure over (grid, bombs, pass): they take the world data explicitly
-// rather than a full game state, so the browser can reuse the EXACT same
-// collision + cornering rules for client-side prediction (see predictMove).
-// `pass` is a Set of tile keys the player is allowed to walk through (bomb
-// tiles they have not yet stepped off).
+// Players "clip to the squares": a player only ever rests on a cell centre and
+// glides one whole tile at a time toward an adjacent centre. Holding a direction
+// chains steps; a new direction can be chosen at each centre, so turning at
+// intersections stays responsive. The model is pure over (grid, bombs) so the
+// browser reuses the EXACT same logic for client-side prediction (see
+// stepPlayerGrid), keeping prediction in lock-step with the authoritative sim.
 
-function cellBlocks(grid, bombs, pass, col, row) {
-  if (!inBounds(col, row)) return true;
-  const c = grid[key(col, row)];
-  if (c === CELL.SOLID || c === CELL.BRICK) return true;
-  // A bomb blocks unless this player is still allowed to pass it.
-  for (const b of bombs) {
-    if (b.col === col && b.row === row && !pass.has(key(col, row))) return true;
-  }
-  return false;
+// 4-directional intent from raw input. Horizontal wins when both axes are held
+// (matches the old engine's tie-break).
+function chooseDir(input) {
+  let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
+  if (dx !== 0 && dy !== 0) dy = 0;
+  if (dx > 0) return { dx: 1, dy: 0, name: 'right' };
+  if (dx < 0) return { dx: -1, dy: 0, name: 'left' };
+  if (dy > 0) return { dx: 0, dy: 1, name: 'down' };
+  if (dy < 0) return { dx: 0, dy: -1, name: 'up' };
+  return null;
 }
 
-function canStand(grid, bombs, pass, x, y) {
-  const minC = Math.floor(x - PLAYER_HALF);
-  const maxC = Math.floor(x + PLAYER_HALF);
-  const minR = Math.floor(y - PLAYER_HALF);
-  const maxR = Math.floor(y + PLAYER_HALF);
-  for (let r = minR; r <= maxR; r++) {
-    for (let c = minC; c <= maxC; c++) {
-      if (cellBlocks(grid, bombs, pass, c, r)) return false;
-    }
-  }
+// Can a player enter this cell? Solids always block; bricks block unless the
+// player has GHOST (wallpass); a live bomb blocks entry (you step off your own
+// bomb by only ever checking the *target* cell, never the one you're leaving).
+function cellWalkable(grid, bombs, col, row, canGhost) {
+  if (!inBounds(col, row)) return false;
+  const c = grid[key(col, row)];
+  if (c === CELL.SOLID) return false;
+  if (c === CELL.BRICK && !canGhost) return false;
+  for (const b of bombs) if (b.col === col && b.row === row) return false;
   return true;
 }
 
-// Move along a single axis with Bomberman-style cornering assist: when blocked
-// head-on, nudge toward the lane centre so players can round corners smoothly.
-function moveAxis(grid, bombs, pass, p, mx, my) {
-  if (canStand(grid, bombs, pass, p.x + mx, p.y + my)) { p.x += mx; p.y += my; return; }
-  const step = Math.abs(mx) + Math.abs(my);
-  if (mx !== 0) {
-    const cy = Math.floor(p.y) + 0.5;
-    const dir = Math.sign(cy - p.y);
-    if (dir !== 0) {
-      const ny = p.y + dir * Math.min(step, Math.abs(cy - p.y));
-      if (canStand(grid, bombs, pass, p.x + mx, ny)) { p.x += mx; p.y = ny; return; }
-      if (canStand(grid, bombs, pass, p.x, ny)) { p.y = ny; return; }
-    }
-  } else if (my !== 0) {
-    const cx = Math.floor(p.x) + 0.5;
-    const dir = Math.sign(cx - p.x);
-    if (dir !== 0) {
-      const nx = p.x + dir * Math.min(step, Math.abs(cx - p.x));
-      if (canStand(grid, bombs, pass, nx, p.y + my)) { p.x = nx; p.y += my; return; }
-      if (canStand(grid, bombs, pass, nx, p.y)) { p.x = nx; return; }
-    }
-  }
-}
-
-// ---- client-side prediction --------------------------------------------------
-//
-// Advance ONE player's position locally using the same movement model as the
-// authoritative step(), so the browser can move the local player the instant a
-// key is pressed instead of waiting a network round-trip. The caller passes the
-// latest known grid + bombs (from a server snapshot) and the player's own
-// derived speed; we mutate p.x / p.y / p.dir / p.moving in place.
+// Advance one player one tick of tile-stepping movement. Mutates p.x/p.y/p.dir/
+// p.moving/p.stepping/p.tx/p.ty. Shared by step() (authoritative) and the client
+// predictor.
 //
 //   grid  : Uint8Array | number[] of CELL values (snapshot grid is a plain array)
-//   bombs : [{ col, row }, ...] from the snapshot
-//   p     : { x, y, dir, moving, speedPicks, passBombs? }
+//   bombs : [{ col, row }, ...]
+//   p     : { x, y, dir, moving, stepping, tx, ty, speedPicks, ghost }
 //   input : { up, down, left, right }
-//   dt    : seconds since the previous prediction step
-export function predictMove(grid, bombs, p, input, dt) {
-  const speed = (BASE_SPEED + (p.speedPicks || 0) * SPEED_PER_PICKUP) * dt;
-  let dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
-  let dy = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-  p.moving = dx !== 0 || dy !== 0;
-  if (dx !== 0 && dy !== 0) dy = 0; // 4-directional, same as the engine
-  if (dx > 0) p.dir = 'right'; else if (dx < 0) p.dir = 'left';
-  else if (dy > 0) p.dir = 'down'; else if (dy < 0) p.dir = 'up';
+//   dt    : seconds since the previous step
+export function stepPlayerGrid(grid, bombs, p, input, dt) {
+  const ox = p.x, oy = p.y;
+  let budget = (BASE_SPEED + (p.speedPicks || 0) * SPEED_PER_PICKUP) * dt;
 
-  const pass = p.passBombs || EMPTY_SET;
-  if (dx !== 0) moveAxis(grid, bombs, pass, p, dx * speed, 0);
-  if (dy !== 0) moveAxis(grid, bombs, pass, p, 0, dy * speed);
+  // Consume the whole tick's distance, possibly crossing several cells when fast
+  // — but always pausing to re-decide at each centre, so we stay grid-locked.
+  while (budget > 0) {
+    if (!p.stepping) {
+      // Snap to the nearest centre before committing a step. This is a no-op in
+      // normal play (a finished step lands exactly on a centre) but cleans up
+      // after a client reconciliation snap to an off-centre server position.
+      const cc = Math.round(p.x - 0.5);
+      const cr = Math.round(p.y - 0.5);
+      p.x = cc + 0.5; p.y = cr + 0.5;
+
+      const dir = chooseDir(input);
+      if (!dir) break;            // no input — rest at the centre
+      p.dir = dir.name;           // face the way we're pushing, even if blocked
+      if (!cellWalkable(grid, bombs, cc + dir.dx, cr + dir.dy, p.ghost)) break;
+      p.tx = (cc + dir.dx) + 0.5;
+      p.ty = (cr + dir.dy) + 0.5;
+      p.stepping = true;
+    }
+
+    const dx = p.tx - p.x, dy = p.ty - p.y;
+    const dist = Math.abs(dx) + Math.abs(dy); // axis-aligned: one term is zero
+    if (budget >= dist) {
+      p.x = p.tx; p.y = p.ty; p.stepping = false; budget -= dist;
+    } else {
+      p.x += Math.sign(dx) * budget;
+      p.y += Math.sign(dy) * budget;
+      budget = 0;
+    }
+  }
+
+  p.moving = p.x !== ox || p.y !== oy;
 }
 
 // ---- bombs & explosions ------------------------------------------------------
@@ -247,8 +257,10 @@ function placeBomb(state, p) {
   const active = state.bombs.filter((b) => b.owner === p.slot).length;
   if (active >= p.maxBombs) return;
   if (state.bombs.some((b) => b.col === col && b.row === row)) return;
-  state.bombs.push({ id: state.bombSeq++, col, row, owner: p.slot, timer: BOMB_FUSE, range: p.range });
-  p.passBombs.add(key(col, row)); // let the owner step off it
+  state.bombs.push({
+    id: state.bombSeq++, col, row, owner: p.slot,
+    timer: BOMB_FUSE, range: p.range, pierce: p.pierce,
+  });
 }
 
 function detonate(state, bomb, toExplode) {
@@ -270,8 +282,14 @@ function detonate(state, bomb, toExplode) {
           state.powerups.set(k, state.hidden.get(k));
           state.hidden.delete(k);
         }
-        addFlame(state, col, row, 'tip', orient);
-        break; // bricks stop the blast
+        // A normal blast stops at the first brick; a PIERCE blast tears straight
+        // through and keeps going to the edge of its range.
+        if (!bomb.pierce) {
+          addFlame(state, col, row, 'tip', orient);
+          break;
+        }
+        addFlame(state, col, row, i === bomb.range ? 'tip' : 'arm', orient);
+        continue;
       }
       // chain-detonate any bomb caught in the blast
       const chained = state.bombs.find((b) => b.col === col && b.row === row && b.timer > 0);
@@ -316,30 +334,13 @@ export function step(state, dt = TICK_DT) {
   // 1. movement + bomb placement
   for (const p of state.players) {
     if (!p.alive) continue;
+    if (p.invuln > 0) p.invuln = Math.max(0, p.invuln - dt);
     const inp = p._input || {};
-    const speed = (BASE_SPEED + p.speedPicks * SPEED_PER_PICKUP) * dt;
 
-    let dx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
-    let dy = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
-    p.moving = dx !== 0 || dy !== 0;
-    if (dx !== 0 && dy !== 0) dy = 0; // 4-directional movement only
-    if (dx > 0) p.dir = 'right'; else if (dx < 0) p.dir = 'left';
-    else if (dy > 0) p.dir = 'down'; else if (dy < 0) p.dir = 'up';
+    // Tile-by-tile movement (clips to the grid).
+    stepPlayerGrid(state.grid, state.bombs, p, inp, dt);
 
-    if (dx !== 0) moveAxis(state.grid, state.bombs, p.passBombs, p, dx * speed, 0);
-    if (dy !== 0) moveAxis(state.grid, state.bombs, p.passBombs, p, 0, dy * speed);
-
-    // release bomb tiles the player has fully walked off of
-    for (const tk of [...p.passBombs]) {
-      const bc = tk % COLS, br = (tk - bc) / COLS;
-      const overlaps =
-        p.x + PLAYER_HALF > bc && p.x - PLAYER_HALF < bc + 1 &&
-        p.y + PLAYER_HALF > br && p.y - PLAYER_HALF < br + 1;
-      const stillBomb = state.bombs.some((b) => b.col === bc && b.row === br);
-      if (!overlaps || !stillBomb) p.passBombs.delete(tk);
-    }
-
-    // bomb on rising edge
+    // bomb on rising edge — drops on the cell the player is centred over
     if (inp.bomb && !p.bombHeld) placeBomb(state, p);
     p.bombHeld = !!inp.bomb;
 
@@ -375,10 +376,15 @@ export function step(state, dt = TICK_DT) {
   // 4. sudden death — close the arena in a spiral to break stalemates
   updateSuddenDeath(state, dt);
 
-  // 5. deaths
+  // 5. deaths — a SHIELD absorbs one otherwise-lethal hit and grants brief
+  // i-frames so a single flame can't burn through several charges at once.
   for (const p of state.players) {
     if (!p.alive) continue;
-    if (playerInFlame(state, p)) p.alive = false;
+    if (p.invuln > 0) continue;
+    if (playerInFlame(state, p)) {
+      if (p.shield > 0) { p.shield -= 1; p.invuln = SHIELD_INVULN; }
+      else p.alive = false;
+    }
   }
 
   // 6. round resolution
@@ -402,6 +408,9 @@ function applyPowerup(p, kind) {
   if (kind === POWERUP.BOMB) p.maxBombs = Math.min(MAX_BOMBS, p.maxBombs + 1);
   else if (kind === POWERUP.RANGE) p.range = Math.min(MAX_RANGE, p.range + 1);
   else if (kind === POWERUP.SPEED) p.speedPicks = Math.min(MAX_SPEED_PICKUPS, p.speedPicks + 1);
+  else if (kind === POWERUP.GHOST) p.ghost = true;
+  else if (kind === POWERUP.PIERCE) p.pierce = true;
+  else if (kind === POWERUP.SHIELD) p.shield = Math.min(MAX_SHIELD, p.shield + 1);
 }
 
 function playerInFlame(state, p) {
@@ -470,7 +479,8 @@ export function toSnapshot(state) {
     players: state.players.map((p) => ({
       slot: p.slot, name: p.name, x: p.x, y: p.y, dir: p.dir,
       alive: p.alive, maxBombs: p.maxBombs, range: p.range,
-      speedPicks: p.speedPicks, score: p.score, moving: p.moving,
+      speedPicks: p.speedPicks, ghost: p.ghost, pierce: p.pierce,
+      shield: p.shield, invuln: p.invuln, score: p.score, moving: p.moving,
     })),
     bombs: state.bombs.map((b) => ({ id: b.id, col: b.col, row: b.row, timer: b.timer, range: b.range })),
     flames: state.flames.map((f) => ({ col: f.col, row: f.row, kind: f.kind, orient: f.orient })),

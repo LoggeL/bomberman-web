@@ -1,7 +1,7 @@
 // Headless sanity check for the shared engine — no browser, no server.
 // Run: node server/test-engine.mjs
 import { createGame, step, setInput, toSnapshot } from '../shared/engine.js';
-import { TICK_DT, CELL, COLS, ROWS, BOMB_FUSE } from '../shared/constants.js';
+import { TICK_DT, CELL, COLS, ROWS, BOMB_FUSE, POWERUP, SHIELD_INVULN } from '../shared/constants.js';
 
 let failed = 0;
 const ok = (cond, msg) => { if (!cond) { failed++; console.error('  ✗', msg); } else console.log('  ✓', msg); };
@@ -57,6 +57,73 @@ const snap = toSnapshot(g);
 const round = JSON.parse(JSON.stringify(snap));
 ok(Array.isArray(round.grid) && round.grid.length === COLS * ROWS, 'snapshot grid ok');
 ok(Array.isArray(round.players) && round.players[0].name === 'Rot', 'snapshot players ok');
+ok('shield' in round.players[0] && 'ghost' in round.players[0] && 'pierce' in round.players[0],
+  'snapshot carries ability fields');
+
+console.log('tile-stepping clips to the grid');
+{
+  const gg = createGame(defs, { seed: 7, winsToWin: 2 });
+  const pp = gg.players[0];
+  const sx = pp.x;
+  setInput(gg, 0, { right: true });
+  for (let i = 0; i < 8; i++) step(gg, TICK_DT);   // mid-stride somewhere
+  setInput(gg, 0, {});
+  for (let i = 0; i < 40; i++) step(gg, TICK_DT);   // let it settle
+  ok(pp.x > sx, 'stepped right');
+  ok(Math.abs(pp.x - (Math.round(pp.x - 0.5) + 0.5)) < 1e-9, 'rests exactly on a cell centre');
+  ok(!pp.moving, 'idle once input released');
+}
+
+console.log('GHOST walks through bricks');
+{
+  const gg = createGame(defs, { seed: 9, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.x = 1.5; pp.y = 1.5; pp.ghost = true;
+  gg.grid[1 * COLS + 2] = CELL.BRICK; // brick immediately to the right
+  setInput(gg, 0, { right: true });
+  for (let i = 0; i < 60; i++) step(gg, TICK_DT);
+  ok(pp.x > 2.0, 'ghost stepped into/through the brick cell');
+}
+
+console.log('PIERCE tears through multiple bricks');
+{
+  const gg = createGame(defs, { seed: 11, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.pierce = true; pp.range = 5;
+  gg.hidden.clear();
+  gg.grid[1 * COLS + 2] = CELL.BRICK;
+  gg.grid[1 * COLS + 3] = CELL.BRICK;
+  gg.grid[1 * COLS + 4] = CELL.EMPTY;
+  gg.grid[3 * COLS + 1] = CELL.EMPTY; // escape route for the bomber
+  pp.x = 1.5; pp.y = 1.5;
+  setInput(gg, 0, { bomb: true }); step(gg, TICK_DT); setInput(gg, 0, { bomb: false });
+  pp.x = 1.5; pp.y = 3.5; // step the bomber out of its own blast
+  for (let i = 0; i < Math.ceil((BOMB_FUSE + 0.1) / TICK_DT); i++) step(gg, TICK_DT);
+  ok(gg.grid[1 * COLS + 2] === CELL.EMPTY && gg.grid[1 * COLS + 3] === CELL.EMPTY,
+    'pierce destroyed both bricks in the line');
+}
+
+console.log('SHIELD absorbs a lethal hit');
+{
+  const gg = createGame(defs, { seed: 13, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.x = 1.5; pp.y = 1.5; pp.shield = 1;
+  gg.flames.push({ col: 1, row: 1, kind: 'center', orient: null, timer: 0.5 });
+  step(gg, TICK_DT);
+  ok(pp.alive, 'shield kept the player alive');
+  ok(pp.shield === 0, 'shield charge consumed');
+  ok(pp.invuln > 0 && pp.invuln <= SHIELD_INVULN, 'i-frames granted');
+}
+
+console.log('GHOST powerup applies via pickup');
+{
+  const gg = createGame(defs, { seed: 15, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.x = 1.5; pp.y = 1.5;
+  gg.powerups.set(1 * COLS + 1, POWERUP.GHOST);
+  step(gg, TICK_DT);
+  ok(pp.ghost === true, 'walking onto a GHOST powerup grants wallpass');
+}
 
 console.log(failed === 0 ? '\nALL ENGINE TESTS PASSED' : `\n${failed} TEST(S) FAILED`);
 process.exit(failed === 0 ? 1 - 1 : 1);

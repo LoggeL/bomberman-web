@@ -5,8 +5,8 @@
 //   'online' — the server owns the game; we render incoming snapshots, but we
 //              client-side *predict* our own player so it responds instantly.
 
-import { createGame, step, setInput, toSnapshot, predictMove } from '../../shared/engine.js';
-import { TICK_DT, COLS } from '../../shared/constants.js';
+import { createGame, step, setInput, toSnapshot, stepPlayerGrid } from '../../shared/engine.js';
+import { TICK_DT } from '../../shared/constants.js';
 import { SNAPSHOT_HZ } from '../../shared/protocol.js';
 import { createRenderer } from './render.js';
 import { createUI } from './ui.js';
@@ -219,15 +219,15 @@ function tickOnline(frameDt) {
   const inp = onlineInput ? onlineInput.current() : null;
   if (sp && sp.alive && inp && curSnap.phase === 'playing') {
     if (!predicted) {
-      predicted = { x: sp.x, y: sp.y, dir: sp.dir, moving: sp.moving, speedPicks: sp.speedPicks };
+      predicted = {
+        x: sp.x, y: sp.y, dir: sp.dir, moving: sp.moving,
+        speedPicks: sp.speedPicks, ghost: sp.ghost, stepping: false, tx: 0, ty: 0,
+      };
     }
+    // Keep ability-derived inputs to the movement model synced from authority.
     predicted.speedPicks = sp.speedPicks;
-    // Mirror the engine's pass rule: a player may walk through any bomb tile
-    // their collision box still overlaps (i.e. a bomb they just placed and are
-    // stepping off). Using the box — not just the centre tile — keeps prediction
-    // from snagging on a freshly-dropped bomb the way the server doesn't.
-    predicted.passBombs = passSet(predicted.x, predicted.y, curSnap.bombs);
-    predictMove(curSnap.grid, curSnap.bombs, predicted, inp, Math.min(frameDt, 0.05));
+    predicted.ghost = sp.ghost;
+    stepPlayerGrid(curSnap.grid, curSnap.bombs, predicted, inp, Math.min(frameDt, 0.05));
   } else {
     predicted = null;
   }
@@ -259,37 +259,21 @@ function tickOnline(frameDt) {
   }
 }
 
-// Pull the prediction back toward the authoritative server position. A big gap
-// (death, sudden-death wall, a mispredicted collision) snaps hard; small drift
-// is corrected gently so steady-state movement doesn't rubber-band.
+// Reconcile the prediction with authority. With tile-stepping a soft off-axis
+// pull would drag the player off the grid, so we only correct on a real
+// discrepancy (death, sudden-death wall, a mispredicted turn under lag): snap to
+// the server position and let the next step re-align to the nearest centre.
+// Small latency lead on the same path is left alone so movement stays crisp.
 function reconcilePrediction(snap) {
   if (!predicted) return;
   const sp = snap.players.find((p) => p.slot === mySlot);
   if (!sp) return;
   if (!sp.alive) { predicted = null; return; }
-  const dx = sp.x - predicted.x;
-  const dy = sp.y - predicted.y;
-  if (Math.hypot(dx, dy) > 0.9) {
-    predicted.x = sp.x; predicted.y = sp.y;
-  } else {
-    predicted.x += dx * 0.3;
-    predicted.y += dy * 0.3;
+  predicted.speedPicks = sp.speedPicks;
+  predicted.ghost = sp.ghost;
+  if (Math.hypot(sp.x - predicted.x, sp.y - predicted.y) > 0.9) {
+    predicted.x = sp.x; predicted.y = sp.y; predicted.stepping = false;
   }
-}
-
-// Bomb tiles the predicted player's collision box overlaps — these are the
-// bombs they're allowed to walk through (matches engine PLAYER_HALF = 0.34).
-const PLAYER_HALF = 0.34;
-function passSet(x, y, bombs) {
-  const pass = new Set();
-  const minC = Math.floor(x - PLAYER_HALF), maxC = Math.floor(x + PLAYER_HALF);
-  const minR = Math.floor(y - PLAYER_HALF), maxR = Math.floor(y + PLAYER_HALF);
-  for (const b of bombs) {
-    if (b.col >= minC && b.col <= maxC && b.row >= minR && b.row <= maxR) {
-      pass.add(b.row * COLS + b.col);
-    }
-  }
-  return pass;
 }
 
 // Linearly blend only the player x/y/dir; everything else snaps to current.
@@ -346,9 +330,9 @@ function detectEvents(prev, snap) {
   for (const p of snap.players) {
     const o = prev.players.find((q) => q.slot === p.slot);
     if (!o) continue;
-    const before = o.maxBombs + o.range + o.speedPicks;
-    const after = p.maxBombs + p.range + p.speedPicks;
-    if (after > before) sound.play('pickup');
+    if (upgradeTotal(p) > upgradeTotal(o)) sound.play('pickup');
+    // A shield just absorbed a hit (charge dropped but still alive).
+    if (p.alive && p.shield < o.shield) { sound.play('shield'); renderer.shake(10); }
     // Player just died.
     if (o.alive && !p.alive) sound.play('death');
   }
@@ -357,6 +341,12 @@ function detectEvents(prev, snap) {
   if (prev.phase === 'playing' && snap.phase !== 'playing') {
     sound.play(snap.winner === null || snap.winner === undefined ? 'draw' : 'win');
   }
+}
+
+// Sum of a player's collected upgrades — a jump means a powerup was grabbed.
+function upgradeTotal(p) {
+  return p.maxBombs + p.range + p.speedPicks + p.shield +
+         (p.ghost ? 1 : 0) + (p.pierce ? 1 : 0);
 }
 
 // ===========================================================================

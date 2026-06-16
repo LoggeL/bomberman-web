@@ -18,6 +18,9 @@ export const POWERUP = {
   BOMB: 1, // +1 max concurrent bombs
   RANGE: 2, // +1 explosion range
   SPEED: 3, // + movement speed
+  GHOST: 4, // walk through destructible bricks (wallpass)
+  PIERCE: 5, // blasts tear through bricks instead of stopping at the first
+  SHIELD: 6, // absorb one otherwise-lethal blast (stackable, with brief i-frames)
 };
 
 // Simulation tuning.
@@ -38,6 +41,8 @@ export const START_BOMBS = 1;
 export const START_RANGE = 2;
 export const MAX_BOMBS = 8;
 export const MAX_RANGE = 8;
+export const MAX_SHIELD = 3;        // how many shield charges a player can hold
+export const SHIELD_INVULN = 1.2;   // seconds of i-frames after a shield absorbs a hit
 
 // Players spawn in the four corners. Order matters: P1..P4.
 export const SPAWNS = [
