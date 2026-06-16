@@ -24,7 +24,7 @@
 // and prefer pre-baked radial gradients for glow where it reads the same.
 
 import {
-  COLS, ROWS, CELL, POWERUP, BOMB_FUSE, PLAYER_COLORS,
+  COLS, ROWS, CELL, POWERUP, BOMB_FUSE, PLAYER_COLORS, GHOST_TIME,
 } from '../../shared/constants.js';
 
 export function createRenderer(canvas) {
@@ -285,6 +285,7 @@ export function createRenderer(canvas) {
     else if (kind === POWERUP.SPEED) { color = '#5dd95d'; glyph = 'speed'; }
     else if (kind === POWERUP.GHOST) { color = '#b98cff'; glyph = 'ghost'; }
     else if (kind === POWERUP.PIERCE) { color = '#ff8a3f'; glyph = 'pierce'; }
+    else if (kind === POWERUP.KICK) { color = '#ff7ed4'; glyph = 'kick'; }
     else { color = '#3fe0ff'; glyph = 'shield'; }
 
     // glowing pill (one shadowBlur use per powerup; there are only a few on
@@ -373,6 +374,17 @@ export function createRenderer(canvas) {
         ctx.lineTo(ox - r * 0.22, r * 0.42);
         ctx.stroke();
       }
+    } else if (glyph === 'kick') {
+      // a ball being booted: small circle + motion arrow
+      ctx.beginPath();
+      ctx.arc(-r * 0.3, 0, r * 0.26, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = Math.max(2, tile * 0.06);
+      ctx.beginPath();
+      ctx.moveTo(r * 0.0, 0); ctx.lineTo(r * 0.52, 0);
+      ctx.moveTo(r * 0.52, 0); ctx.lineTo(r * 0.3, -r * 0.2);
+      ctx.moveTo(r * 0.52, 0); ctx.lineTo(r * 0.3, r * 0.2);
+      ctx.stroke();
     } else {
       // shield crest
       ctx.beginPath();
@@ -390,9 +402,49 @@ export function createRenderer(canvas) {
 
   // ---- bombs (dynamic) ------------------------------------------------------
 
+  // The cells a bomb's blast will cover, mirroring the engine's detonate(): the
+  // centre plus each arm out to `range`, stopping at SOLID, and at the first
+  // BRICK unless the bomb pierces. Used only for the on-floor preview.
+  function blastCells(b, grid) {
+    const cells = [[b.col, b.row]];
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (const [dc, dr] of dirs) {
+      for (let i = 1; i <= b.range; i++) {
+        const col = b.col + dc * i, row = b.row + dr * i;
+        if (col < 0 || col >= COLS || row < 0 || row >= ROWS) break;
+        const c = grid[row * COLS + col];
+        if (c === CELL.SOLID) break;
+        cells.push([col, row]);
+        if (c === CELL.BRICK) { if (!b.pierce) break; } // brick stops a normal blast
+      }
+    }
+    return cells;
+  }
+
+  // Faint, pulsing warning of a bomb's reach — intensifies as the fuse burns
+  // down so you can read the danger zone before it goes off.
+  function drawBlastPreview(b, grid) {
+    const frac = Math.max(0, Math.min(1, (b.timer != null ? b.timer : BOMB_FUSE) / BOMB_FUSE));
+    const urgency = 1 - frac;                       // 0 fresh -> 1 about to blow
+    const pulse = 0.5 + 0.5 * Math.sin(now() * (6 + urgency * 12));
+    const alpha = 0.10 + urgency * 0.16 + pulse * 0.06;
+    ctx.save();
+    ctx.fillStyle = `rgba(255, 138, 63, ${alpha})`;
+    const inset = tile * 0.16;
+    for (const [col, row] of blastCells(b, grid)) {
+      roundRect(ctx, px(col) + inset, py(row) + inset, tile - inset * 2, tile - inset * 2, tile * 0.18);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   function drawBomb(b) {
-    const x = px(b.col) + tile / 2;
-    const y = py(b.row) + tile / 2;
+    // Use the bomb's continuous position when present (kicked bombs slide
+    // between cells); fall back to the cell centre for safety.
+    const bx = b.x != null ? b.x : b.col + 0.5;
+    const by = b.y != null ? b.y : b.row + 0.5;
+    const x = px(0) + bx * tile;
+    const y = py(0) + by * tile;
     // pulse faster as the fuse runs down
     const frac = Math.max(0, Math.min(1, b.timer / BOMB_FUSE));
     const speed = 6 + (1 - frac) * 22;
@@ -583,6 +635,21 @@ export function createRenderer(canvas) {
     ctx.fillStyle = color;
     ctx.fillText(label, x, ty);
     ctx.restore();
+
+    // timed-buff bar below the character (currently ghost / wallpass)
+    if (p.alive && p.ghost > 0) {
+      const frac = Math.max(0, Math.min(1, p.ghost / GHOST_TIME));
+      const bw = r * 1.7, bh = Math.max(2, tile * 0.08);
+      const bx = x - bw / 2, byb = y + r * 1.35;
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      roundRect(ctx, bx - 1, byb - 1, bw + 2, bh + 2, bh);
+      ctx.fill();
+      ctx.fillStyle = '#b98cff';
+      roundRect(ctx, bx, byb, bw * frac, bh, bh);
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
   // ---- frame ----------------------------------------------------------------
@@ -629,6 +696,10 @@ export function createRenderer(canvas) {
     ctx.save();
     roundRect(ctx, originX, originY, boardW, boardH, 8);
     ctx.clip();
+
+    // blast-range preview (faint ghost of where each live bomb will reach),
+    // drawn under everything dynamic so it reads as a floor warning
+    for (const b of snap.bombs) drawBlastPreview(b, snap.grid);
 
     // loose powerups
     for (const pu of snap.powerups) drawPowerup(pu.col, pu.row, pu.kind);

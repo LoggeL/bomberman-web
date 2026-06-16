@@ -193,6 +193,11 @@ export function createSound() {
       tone('sine', 440, 220, t0, 0.16, 0.18);
       noise(t0, 0.08, 0.12, 2600);
     },
+    // Kicking a bomb: a short rising whoosh + thump.
+    kick(t0) {
+      tone('sine', 180, 320, t0, 0.14, 0.26);
+      noise(t0, 0.1, 0.16, 1400);
+    },
   };
 
   // -------------------------------------------------------------------------

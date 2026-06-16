@@ -249,20 +249,24 @@ function tickOnline(frameDt) {
     predBombs = predBombs.filter((b) =>
       b.until > nowMs && !curSnap.bombs.some((s) => s.col === b.col && s.row === b.row));
     const bombs = predBombs.length ? curSnap.bombs.concat(predBombs) : curSnap.bombs;
-    stepPlayerGrid(curSnap.grid, bombs, predicted, inp, Math.min(frameDt, 0.05));
+    const pdt = Math.min(frameDt, 0.05);
+    stepPlayerGrid(curSnap.grid, bombs, predicted, inp, pdt);
+    // Tick the predicted ghost timer down too (re-synced from authority above),
+    // so wallpass doesn't mispredict for a frame right as ghost expires.
+    if (predicted.ghost > 0) predicted.ghost = Math.max(0, predicted.ghost - pdt);
   } else {
     predicted = null;
     predBombHeld = false;
   }
 
-  // Build the render view: other players interpolated from the buffered
-  // snapshots (smooth despite jitter), our own player from the prediction.
-  const players = renderPlayers();
+  // Build the render view: other players + sliding bombs interpolated from the
+  // buffered snapshots (smooth despite jitter), our own player from prediction.
+  const view = interpolatedView();
   if (predicted) {
-    const me = players.find((p) => p.slot === mySlot);
+    const me = view.players.find((p) => p.slot === mySlot);
     if (me) { me.x = predicted.x; me.y = predicted.y; me.dir = predicted.dir; me.moving = predicted.moving; }
   }
-  const render = { ...curSnap, players };
+  const render = { ...curSnap, players: view.players, bombs: view.bombs };
 
   renderer.draw(render, { localSlots: [mySlot] });
   updateHudThrottled(render, [mySlot], frameDt);
@@ -299,13 +303,15 @@ function reconcilePrediction(snap) {
   }
 }
 
-// Interpolated player view rendered INTERP_DELAY ms in the past: find the two
-// buffered snapshots that bracket that time and linearly blend positions between
-// them. Robust to variable / late snapshot arrival (no freeze-then-jump). Stats
-// come from the latest snapshot; only x/y/dir/moving are interpolated.
-function renderPlayers() {
-  const base = curSnap.players;
-  if (snapBuf.length < 2) return base.map((p) => ({ ...p }));
+// Interpolated view rendered INTERP_DELAY ms in the past: find the two buffered
+// snapshots bracketing that time and linearly blend PLAYER positions between
+// them (robust to variable / late arrival — no freeze-then-jump). Bombs are NOT
+// interpolated: they render at their latest position so a kicked bomb and its
+// explosion flame (which comes from the latest snapshot) stay in sync.
+function interpolatedView() {
+  const players = curSnap.players.map((p) => ({ ...p }));
+  const bombs = curSnap.bombs.map((b) => ({ ...b }));
+  if (snapBuf.length < 2) return { players, bombs };
 
   const target = performance.now() - INTERP_DELAY;
   const first = snapBuf[0], last = snapBuf[snapBuf.length - 1];
@@ -323,18 +329,16 @@ function renderPlayers() {
   const span = b.at - a.at;
   const f = span > 0 ? (target - a.at) / span : 1;
 
-  return base.map((p) => {
+  for (const p of players) {
     const pa = a.snap.players.find((q) => q.slot === p.slot);
     const pb = b.snap.players.find((q) => q.slot === p.slot);
-    if (!pa || !pb) return { ...p };
-    return {
-      ...p, // latest stats (score / shield / alive / ...)
-      x: pa.x + (pb.x - pa.x) * f,
-      y: pa.y + (pb.y - pa.y) * f,
-      dir: pb.dir,
-      moving: pb.moving,
-    };
-  });
+    if (!pa || !pb) continue;
+    p.x = pa.x + (pb.x - pa.x) * f;
+    p.y = pa.y + (pb.y - pa.y) * f;
+    p.dir = pb.dir;
+    p.moving = pb.moving;
+  }
+  return { players, bombs };
 }
 
 function sameInput(a, b) {
@@ -352,11 +356,14 @@ function detectEvents(prev, snap) {
   if (!prev || !snap || prev === snap) return;
 
   // New bombs (by stable id) -> placement blip. Keying on id (not col/row)
-  // catches a fresh bomb dropped on a tile that just detonated.
+  // catches a fresh bomb dropped on a tile that just detonated. A bomb that
+  // starts sliding (gains velocity) -> kick whoosh.
   for (const b of snap.bombs) {
-    if (!prev.bombs.some((o) => o.id === b.id)) {
-      sound.play('place');
-    }
+    const o = prev.bombs.find((q) => q.id === b.id);
+    if (!o) { sound.play('place'); continue; }
+    const wasMoving = o.vx || o.vy;
+    const nowMoving = b.vx || b.vy;
+    if (!wasMoving && nowMoving) sound.play('kick');
   }
 
   // New explosion centres -> detonation + screen shake.

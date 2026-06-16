@@ -1,7 +1,7 @@
 // Headless sanity check for the shared engine — no browser, no server.
 // Run: node server/test-engine.mjs
 import { createGame, step, setInput, toSnapshot } from '../shared/engine.js';
-import { TICK_DT, CELL, COLS, ROWS, BOMB_FUSE, POWERUP, SHIELD_INVULN } from '../shared/constants.js';
+import { TICK_DT, CELL, COLS, ROWS, BOMB_FUSE, POWERUP, SHIELD_INVULN, GHOST_TIME } from '../shared/constants.js';
 
 let failed = 0;
 const ok = (cond, msg) => { if (!cond) { failed++; console.error('  ✗', msg); } else console.log('  ✓', msg); };
@@ -74,15 +74,53 @@ console.log('tile-stepping clips to the grid');
   ok(!pp.moving, 'idle once input released');
 }
 
-console.log('GHOST walks through bricks');
+console.log('GHOST walks through bricks (and is temporary)');
 {
   const gg = createGame(defs, { seed: 9, winsToWin: 2 });
   const pp = gg.players[0];
-  pp.x = 1.5; pp.y = 1.5; pp.ghost = true;
+  pp.x = 1.5; pp.y = 1.5; pp.ghost = GHOST_TIME;
   gg.grid[1 * COLS + 2] = CELL.BRICK; // brick immediately to the right
   setInput(gg, 0, { right: true });
   for (let i = 0; i < 60; i++) step(gg, TICK_DT);
   ok(pp.x > 2.0, 'ghost stepped into/through the brick cell');
+  ok(pp.ghost > 0 && pp.ghost < GHOST_TIME, 'ghost timer is counting down');
+  // run the rest of the timer out (no input) and confirm it expires
+  setInput(gg, 0, {});
+  for (let i = 0; i < Math.ceil(GHOST_TIME / TICK_DT) + 5; i++) step(gg, TICK_DT);
+  ok(pp.ghost === 0, 'ghost expires after its duration');
+}
+
+console.log('KICK launches a bomb that slides until it hits something');
+{
+  const gg = createGame(defs, { seed: 17, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.kick = true;
+  // clear a horizontal lane so a kicked bomb can slide
+  for (let c = 1; c <= 6; c++) gg.grid[1 * COLS + c] = CELL.EMPTY;
+  pp.x = 1.5; pp.y = 1.5;
+  // a stationary bomb directly to the right at (2,1)
+  gg.bombs.push({ id: 999, col: 2, row: 1, x: 2.5, y: 1.5, vx: 0, vy: 0, owner: 1, timer: BOMB_FUSE, range: 2, pierce: false });
+  setInput(gg, 0, { right: true });
+  step(gg, TICK_DT);
+  const b = gg.bombs.find((x) => x.id === 999);
+  ok(b && b.vx === 1, 'walking into a bomb kicks it');
+  const startCol = b.col;
+  for (let i = 0; i < 30; i++) step(gg, TICK_DT);
+  ok(b.col > startCol, 'kicked bomb slid down the lane');
+  ok(b.col === 6 || gg.grid[1 * COLS + (b.col + 1)] === CELL.SOLID, 'bomb stopped at the wall');
+}
+
+console.log('kicked bomb cannot tunnel a wall that closes mid-slide');
+{
+  const gg = createGame(defs, { seed: 21, winsToWin: 2 });
+  for (let c = 1; c <= 8; c++) gg.grid[1 * COLS + c] = CELL.EMPTY;
+  const bomb = { id: 777, col: 2, row: 1, x: 2.5, y: 1.5, vx: 1, vy: 0, owner: 1, timer: 99, range: 2, pierce: false };
+  gg.bombs.push(bomb);
+  for (let i = 0; i < 9; i++) step(gg, TICK_DT);   // bomb now past col 3, heading into col 4
+  gg.grid[1 * COLS + 4] = CELL.SOLID;               // a wall closes right ahead of it
+  for (let i = 0; i < 30; i++) step(gg, TICK_DT);
+  const survivor = gg.bombs.find((x) => x.id === 777);
+  ok(survivor && survivor.col <= 3, 'bomb stopped before the closed wall (no tunnel)');
 }
 
 console.log('PIERCE tears through multiple bricks');
@@ -108,11 +146,26 @@ console.log('SHIELD absorbs a lethal hit');
   const gg = createGame(defs, { seed: 13, winsToWin: 2 });
   const pp = gg.players[0];
   pp.x = 1.5; pp.y = 1.5; pp.shield = 1;
-  gg.flames.push({ col: 1, row: 1, kind: 'center', orient: null, timer: 0.5 });
+  gg.flames.push({ col: 1, row: 1, kind: 'center', orient: null, timer: 0.5, fresh: true });
   step(gg, TICK_DT);
   ok(pp.alive, 'shield kept the player alive');
   ok(pp.shield === 0, 'shield charge consumed');
   ok(pp.invuln > 0 && pp.invuln <= SHIELD_INVULN, 'i-frames granted');
+}
+
+console.log('only the initial blast kills — lingering fire is harmless');
+{
+  const gg = createGame(defs, { seed: 23, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.x = 1.5; pp.y = 1.5;
+  // a flame that already ignited on a PREVIOUS tick (fresh cleared) is décor
+  gg.flames.push({ col: 1, row: 1, kind: 'center', orient: null, timer: 0.4, fresh: false });
+  step(gg, TICK_DT);
+  ok(pp.alive, 'walking in lingering (non-fresh) fire does not kill');
+  // but a fresh ignition on the same tile this tick does kill
+  gg.flames.push({ col: 1, row: 1, kind: 'center', orient: null, timer: 0.5, fresh: true });
+  step(gg, TICK_DT);
+  ok(!pp.alive, 'the initial blast (fresh flame) kills');
 }
 
 console.log('GHOST powerup applies via pickup');
@@ -122,7 +175,7 @@ console.log('GHOST powerup applies via pickup');
   pp.x = 1.5; pp.y = 1.5;
   gg.powerups.set(1 * COLS + 1, POWERUP.GHOST);
   step(gg, TICK_DT);
-  ok(pp.ghost === true, 'walking onto a GHOST powerup grants wallpass');
+  ok(pp.ghost > 0, 'walking onto a GHOST powerup grants (timed) wallpass');
 }
 
 console.log(failed === 0 ? '\nALL ENGINE TESTS PASSED' : `\n${failed} TEST(S) FAILED`);

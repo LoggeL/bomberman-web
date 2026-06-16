@@ -237,7 +237,7 @@ export function createUI(callbacks = {}) {
       const rg = String(p.range);    if (c.rangeEl.textContent !== rg) c.rangeEl.textContent = rg;
       const sp = String(p.speedPicks); if (c.speedEl.textContent !== sp) c.speedEl.textContent = sp;
       const sh = String(p.shield);   if (c.shieldEl.textContent !== sh) c.shieldEl.textContent = sh;
-      const badges = (p.ghost ? '👻' : '') + (p.pierce ? '💥' : '');
+      const badges = (p.ghost > 0 ? '👻' : '') + (p.pierce ? '💥' : '') + (p.kick ? '🦵' : '');
       if (c.badgesEl.textContent !== badges) c.badgesEl.textContent = badges;
       if (c.dead !== !p.alive) { c.dead = !p.alive; c.card.classList.toggle('dead', !p.alive); }
     }

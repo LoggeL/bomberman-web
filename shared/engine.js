@@ -14,7 +14,7 @@ import {
   BOMB_FUSE, FLAME_TIME, BRICK_FILL, POWERUP_CHANCE,
   BASE_SPEED, SPEED_PER_PICKUP, MAX_SPEED_PICKUPS,
   START_BOMBS, START_RANGE, MAX_BOMBS, MAX_RANGE,
-  MAX_SHIELD, SHIELD_INVULN,
+  MAX_SHIELD, SHIELD_INVULN, GHOST_TIME, KICK_SPEED,
   SPAWNS, ROUND_END_DELAY, SUDDEN_DEATH_TIME,
 } from './constants.js';
 
@@ -70,9 +70,10 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
       maxBombs: START_BOMBS,
       range: START_RANGE,
       speedPicks: 0,
-      ghost: false,    // wallpass: may walk through bricks
+      ghost: 0,        // seconds of wallpass remaining (0 = off)
       pierce: false,   // bombs tear through bricks
       shield: 0,       // absorbs lethal hits
+      kick: false,     // can kick bombs
       invuln: 0,       // seconds of i-frames remaining after a shield pop
       score: 0,
       bombHeld: false,
@@ -143,8 +144,9 @@ function generateRound(state) {
     p.bombHeld = false;
     p.stepping = false;
     p.invuln = 0;
+    p.ghost = 0; // temporary buff — does not carry into the next round
     p.moving = false;
-    // Note: collected upgrades (bombs/range/speed/ghost/pierce/shield) persist
+    // Note: permanent upgrades (bombs/range/speed/pierce/shield/kick) persist
     // across rounds within a match — only per-round transient state resets here.
   }
 }
@@ -153,12 +155,13 @@ function generateRound(state) {
 // flashy abilities (ghost / pierce / shield) are rarer treats.
 function weightedPowerup(rng) {
   const r = rng();
-  if (r < 0.30) return POWERUP.BOMB;   // 30%
-  if (r < 0.54) return POWERUP.RANGE;  // 24%
-  if (r < 0.70) return POWERUP.SPEED;  // 16%
-  if (r < 0.82) return POWERUP.GHOST;  // 12%
-  if (r < 0.93) return POWERUP.PIERCE; // 11%
-  return POWERUP.SHIELD;               // 7%
+  if (r < 0.26) return POWERUP.BOMB;   // 26%
+  if (r < 0.48) return POWERUP.RANGE;  // 22%
+  if (r < 0.62) return POWERUP.SPEED;  // 14%
+  if (r < 0.74) return POWERUP.KICK;   // 12%
+  if (r < 0.84) return POWERUP.GHOST;  // 10%
+  if (r < 0.93) return POWERUP.PIERCE; //  9%
+  return POWERUP.SHIELD;               //  7%
 }
 
 // ---- per-player input --------------------------------------------------------
@@ -229,7 +232,10 @@ export function stepPlayerGrid(grid, bombs, p, input, dt) {
       const dir = chooseDir(input);
       if (!dir) break;            // no input — rest at the centre
       p.dir = dir.name;           // face the way we're pushing, even if blocked
-      if (!cellWalkable(grid, bombs, cc + dir.dx, cr + dir.dy, p.ghost)) break;
+      // Wallpass while ghosting, and as an escape grace if ghost expired while
+      // embedded inside a brick (so a player can never get stuck in a wall).
+      const canGhost = p.ghost > 0 || grid[key(cc, cr)] === CELL.BRICK;
+      if (!cellWalkable(grid, bombs, cc + dir.dx, cr + dir.dy, canGhost)) break;
       p.tx = (cc + dir.dx) + 0.5;
       p.ty = (cr + dir.dy) + 0.5;
       p.stepping = true;
@@ -262,7 +268,69 @@ function placeBomb(state, p) {
   state.bombs.push({
     id: state.bombSeq++, col, row, owner: p.slot,
     timer: BOMB_FUSE, range: p.range, pierce: p.pierce,
+    // Continuous position (centre-based) + slide velocity for kicked bombs.
+    x: col + 0.5, y: row + 0.5, vx: 0, vy: 0,
   });
+}
+
+// Can a sliding bomb occupy this cell? Blocked by walls, bricks, the board edge,
+// and any OTHER bomb. (Players don't stop a kicked bomb — it slides under them.)
+function bombCanEnter(state, self, col, row) {
+  if (!inBounds(col, row)) return false;
+  const c = state.grid[key(col, row)];
+  if (c === CELL.SOLID || c === CELL.BRICK) return false;
+  for (const b of state.bombs) if (b !== self && b.col === col && b.row === row) return false;
+  return true;
+}
+
+// Advance a kicked bomb: glide centre-to-centre in its slide direction. The next
+// cell is re-checked on arrival at EVERY centre (not just the first), so a bomb
+// can never skip past a wall regardless of speed. Its logical (col,row) tracks
+// the nearest cell so detonation/chains stay grid-correct.
+function updateBombSlide(state, b, dt) {
+  if (b.vx === 0 && b.vy === 0) return;
+  // Safety: if a wall closed onto our cell mid-slide, back out to the cell we
+  // came from and stop, so we never end up embedded in (or tunnel through) it.
+  const here = state.grid[key(Math.round(b.x - 0.5), Math.round(b.y - 0.5))];
+  if (here === CELL.SOLID || here === CELL.BRICK) {
+    b.col = Math.round(b.x - 0.5) - b.vx;
+    b.row = Math.round(b.y - 0.5) - b.vy;
+    b.x = b.col + 0.5; b.y = b.row + 0.5;
+    b.vx = 0; b.vy = 0;
+    return;
+  }
+  let budget = KICK_SPEED * dt;
+  while (budget > 0) {
+    const cc = Math.round(b.x - 0.5), cr = Math.round(b.y - 0.5);
+    const tx = (cc + b.vx) + 0.5, ty = (cr + b.vy) + 0.5;
+    const dx = tx - b.x, dy = ty - b.y;
+    const dist = Math.abs(dx) + Math.abs(dy);
+    if (budget >= dist) {
+      // Arrived at the next centre — commit, then check the cell beyond before
+      // continuing. (Snapping to the exact centre keeps these checks reliable at
+      // any KICK_SPEED, with no tunneling.)
+      b.x = tx; b.y = ty; budget -= dist;
+      if (!bombCanEnter(state, b, (cc + b.vx) + b.vx, (cr + b.vy) + b.vy)) { b.vx = 0; b.vy = 0; break; }
+    } else {
+      b.x += Math.sign(dx) * budget; b.y += Math.sign(dy) * budget; budget = 0;
+    }
+  }
+  b.col = Math.round(b.x - 0.5);
+  b.row = Math.round(b.y - 0.5);
+}
+
+// If a kick-capable player at a centre pushes into a stationary bomb that has
+// somewhere to go, launch it sliding in that direction.
+function tryKick(state, p, inp) {
+  if (p.stepping) return;
+  const dir = chooseDir(inp);
+  if (!dir) return;
+  const cc = Math.round(p.x - 0.5), cr = Math.round(p.y - 0.5);
+  const tcol = cc + dir.dx, trow = cr + dir.dy;
+  const bomb = state.bombs.find((b) => b.col === tcol && b.row === trow && b.vx === 0 && b.vy === 0);
+  if (!bomb) return;
+  if (!bombCanEnter(state, bomb, tcol + dir.dx, trow + dir.dy)) return; // nowhere to slide
+  bomb.vx = dir.dx; bomb.vy = dir.dy;
 }
 
 function detonate(state, bomb, toExplode) {
@@ -307,13 +375,16 @@ function addFlame(state, col, row, kind, orient) {
   // Overlapping flames refresh the timer at that tile. A 'center' always wins
   // over a residual arm/tip so a new detonation landing on an old flame is
   // still marked as a blast centre (drawn correctly + detectable as an event).
+  // `fresh` marks a tile that was (re)ignited THIS tick — only fresh flame is
+  // lethal, so the lingering fire afterwards is harmless to walk through.
   const existing = state.flames.find((f) => f.col === col && f.row === row);
   if (existing) {
     existing.timer = FLAME_TIME;
+    existing.fresh = true;
     if (kind === 'center') { existing.kind = 'center'; existing.orient = null; }
     return;
   }
-  state.flames.push({ col, row, kind, orient, timer: FLAME_TIME });
+  state.flames.push({ col, row, kind, orient, timer: FLAME_TIME, fresh: true });
 }
 
 // ---- main step ---------------------------------------------------------------
@@ -337,7 +408,12 @@ export function step(state, dt = TICK_DT) {
   for (const p of state.players) {
     if (!p.alive) continue;
     if (p.invuln > 0) p.invuln = Math.max(0, p.invuln - dt);
+    if (p.ghost > 0) p.ghost = Math.max(0, p.ghost - dt);
     const inp = p._input || {};
+
+    // Kick a bomb we're walking into (before moving, so we stay put this tick
+    // while the bomb slides away).
+    if (p.kick) tryKick(state, p, inp);
 
     // Tile-by-tile movement (clips to the grid).
     stepPlayerGrid(state.grid, state.bombs, p, inp, dt);
@@ -355,6 +431,7 @@ export function step(state, dt = TICK_DT) {
   }
 
   // 2. bombs
+  for (const bomb of state.bombs) updateBombSlide(state, bomb, dt); // kicked bombs glide
   for (const bomb of state.bombs) bomb.timer -= dt;
   // detonate (looping so chain reactions resolve this tick)
   let exploded = true;
@@ -378,8 +455,9 @@ export function step(state, dt = TICK_DT) {
   // 4. sudden death — close the arena in a spiral to break stalemates
   updateSuddenDeath(state, dt);
 
-  // 5. deaths — a SHIELD absorbs one otherwise-lethal hit and grants brief
-  // i-frames so a single flame can't burn through several charges at once.
+  // 5. deaths — only the INITIAL blast (a flame ignited this tick) is lethal;
+  // the lingering fire afterwards is harmless. A SHIELD absorbs one otherwise-
+  // lethal hit and grants brief i-frames so one blast can't burn several charges.
   for (const p of state.players) {
     if (!p.alive) continue;
     if (p.invuln > 0) continue;
@@ -388,6 +466,8 @@ export function step(state, dt = TICK_DT) {
       else p.alive = false;
     }
   }
+  // The blast has resolved for this tick — remaining flame is now just décor.
+  for (const f of state.flames) f.fresh = false;
 
   // 6. round resolution
   const alive = state.players.filter((p) => p.alive);
@@ -410,9 +490,10 @@ function applyPowerup(p, kind) {
   if (kind === POWERUP.BOMB) p.maxBombs = Math.min(MAX_BOMBS, p.maxBombs + 1);
   else if (kind === POWERUP.RANGE) p.range = Math.min(MAX_RANGE, p.range + 1);
   else if (kind === POWERUP.SPEED) p.speedPicks = Math.min(MAX_SPEED_PICKUPS, p.speedPicks + 1);
-  else if (kind === POWERUP.GHOST) p.ghost = true;
+  else if (kind === POWERUP.GHOST) p.ghost = GHOST_TIME; // (re)arm the timer
   else if (kind === POWERUP.PIERCE) p.pierce = true;
   else if (kind === POWERUP.SHIELD) p.shield = Math.min(MAX_SHIELD, p.shield + 1);
+  else if (kind === POWERUP.KICK) p.kick = true;
 }
 
 function playerInFlame(state, p) {
@@ -421,7 +502,7 @@ function playerInFlame(state, p) {
   const minR = Math.floor(p.y - PLAYER_HALF + 0.15);
   const maxR = Math.floor(p.y + PLAYER_HALF - 0.15);
   return state.flames.some(
-    (f) => f.col >= minC && f.col <= maxC && f.row >= minR && f.row <= maxR,
+    (f) => f.fresh && f.col >= minC && f.col <= maxC && f.row >= minR && f.row <= maxR,
   );
 }
 
@@ -452,7 +533,12 @@ function updateSuddenDeath(state, dt) {
   state.hidden.delete(k);
   state.powerups.delete(k);
   for (let i = state.bombs.length - 1; i >= 0; i--) {
-    if (state.bombs[i].col === col && state.bombs[i].row === row) state.bombs.splice(i, 1);
+    const b = state.bombs[i];
+    // Remove a bomb on the cell, or one currently sliding into it (its logical
+    // cell leads behind its target), so a kicked bomb can't slip through a wall.
+    const onCell = b.col === col && b.row === row;
+    const slidingInto = (b.vx || b.vy) && b.col + b.vx === col && b.row + b.vy === row;
+    if (onCell || slidingInto) state.bombs.splice(i, 1);
   }
   for (const p of state.players) {
     if (p.alive && Math.floor(p.x) === col && Math.floor(p.y) === row) p.alive = false;
@@ -482,9 +568,12 @@ export function toSnapshot(state) {
       slot: p.slot, name: p.name, x: p.x, y: p.y, dir: p.dir,
       alive: p.alive, maxBombs: p.maxBombs, range: p.range,
       speedPicks: p.speedPicks, ghost: p.ghost, pierce: p.pierce,
-      shield: p.shield, invuln: p.invuln, score: p.score, moving: p.moving,
+      shield: p.shield, kick: p.kick, invuln: p.invuln, score: p.score, moving: p.moving,
     })),
-    bombs: state.bombs.map((b) => ({ id: b.id, col: b.col, row: b.row, timer: b.timer, range: b.range })),
+    bombs: state.bombs.map((b) => ({
+      id: b.id, col: b.col, row: b.row, x: b.x, y: b.y,
+      vx: b.vx, vy: b.vy, timer: b.timer, range: b.range, pierce: b.pierce,
+    })),
     flames: state.flames.map((f) => ({ col: f.col, row: f.row, kind: f.kind, orient: f.orient })),
   };
 }
