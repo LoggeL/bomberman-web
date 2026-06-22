@@ -10,7 +10,7 @@ import { TICK_DT } from '../../shared/constants.js';
 import { SNAPSHOT_HZ } from '../../shared/protocol.js';
 import { createRenderer } from './render.js';
 import { createUI } from './ui.js';
-import { createLocalInput, createPlayerInput } from './input.js';
+import { createLocalInput, createPlayerInput, initTouchControls, setTouchControlsVisible } from './input.js';
 import { createNet } from './net.js';
 import { createSound } from './sounds.js';
 
@@ -106,6 +106,7 @@ function startLocal(numPlayers, winsToWin) {
   ui.resetHud();
   ui.show('hud');
   sound.play('start');
+  setTouchControlsVisible(true);
 }
 
 function stepLocal(frameDt) {
@@ -169,6 +170,7 @@ function connectAndJoin(name, room, winsToWin) {
       ui.resetHud();
       ui.show('hud');
       sound.play('start');
+      setTouchControlsVisible(true);
     },
     onSnapshot: (snap) => {
       // Detect SFX/shake events against the previously-held server snapshot,
@@ -429,6 +431,7 @@ function onRestart() {
 function backToMenu() {
   teardownLocal();
   teardownOnline();
+  setTouchControlsVisible(false);
   mode = 'menu';
   curSnap = null;
   snapBuf = [];
@@ -484,4 +487,5 @@ window.addEventListener('resize', () => renderer.resize());
 // Boot.
 ui.show('menu');
 renderer.draw(null, {});
+initTouchControls();
 requestAnimationFrame(frame);

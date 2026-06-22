@@ -561,3 +561,91 @@ body::before {
   body::before { animation: none; }
   .btn:hover, .btn:active, .seg-btn:active, #btn-sound:hover { transform: none; }
 }
+
+/* ========================= MOBILE CONTROLS =============================== */
+.mobile-controls {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: none;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding: 20px 24px env(safe-area-inset-bottom, 20px);
+  z-index: 20;
+  pointer-events: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mobile-controls.is-visible {
+  display: flex;
+}
+
+/* D-Pad */
+.dpad {
+  position: relative;
+  width: 144px;
+  height: 144px;
+  pointer-events: auto;
+}
+.dpad-btn {
+  position: absolute;
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  border: 1px solid var(--panel-border);
+  background: rgba(18, 24, 41, 0.78);
+  color: var(--text);
+  font-size: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.1s, transform 0.08s;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+}
+.dpad-btn:active,
+.dpad-btn.is-active {
+  background: rgba(63, 182, 255, 0.45);
+  transform: scale(0.92);
+}
+.dpad-up    { top: 0;    left: 50%; transform: translateX(-50%); }
+.dpad-up:active,
+.dpad-up.is-active { transform: translateX(-50%) scale(0.92); }
+.dpad-down  { bottom: 0; left: 50%; transform: translateX(-50%); }
+.dpad-down:active,
+.dpad-down.is-active { transform: translateX(-50%) scale(0.92); }
+.dpad-left  { top: 50%; left: 0;    transform: translateY(-50%); }
+.dpad-left:active,
+.dpad-left.is-active { transform: translateY(-50%) scale(0.92); }
+.dpad-right { top: 50%; right: 0;   transform: translateY(-50%); }
+.dpad-right:active,
+.dpad-right.is-active { transform: translateY(-50%) scale(0.92); }
+
+/* Bomb Button */
+.bomb-btn {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 84, 112, 0.5);
+  background: rgba(255, 84, 112, 0.25);
+  color: #fff;
+  font-size: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background 0.1s, transform 0.08s;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;
+  box-shadow: 0 0 20px rgba(255, 84, 112, 0.3);
+}
+.bomb-btn:active,
+.bomb-btn.is-active {
+  background: rgba(255, 84, 112, 0.65);
+  transform: scale(0.9);
+  box-shadow: 0 0 30px rgba(255, 84, 112, 0.6);
+}
