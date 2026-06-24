@@ -46,6 +46,7 @@ export const MAX_SHIELD = 3;        // how many shield charges a player can hold
 export const SHIELD_INVULN = 1.2;   // seconds of i-frames after a shield absorbs a hit
 export const GHOST_TIME = 8;        // seconds of wallpass per GHOST pickup (re-arms on pickup)
 export const KICK_SPEED = 7.5;      // tiles/second a kicked bomb slides
+export const SPAWN_BOMB_LOCK = 1.0; // seconds after spawn before bombs can be placed
 
 // Players spawn in the four corners. Order matters: P1..P4.
 export const SPAWNS = [

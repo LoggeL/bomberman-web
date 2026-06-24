@@ -242,7 +242,7 @@ export function createUI(callbacks = {}) {
       if (c.dead !== !p.alive) { c.dead = !p.alive; c.card.classList.toggle('dead', !p.alive); }
     }
 
-    const roundText = `Runde ${snap.round} · Best of ${snap.winsToWin}`;
+    const roundText = `Runde ${snap.round} · Ziel: ${snap.winsToWin} Sieg${snap.winsToWin === 1 ? '' : 'e'}`;
     if (roundText !== lastRoundText) { hudRound.textContent = roundText; lastRoundText = roundText; }
 
     // Timer / sudden-death countdown.

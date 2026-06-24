@@ -33,6 +33,7 @@ console.log('bomb + explosion kills');
 // Put both players adjacent and detonate.
 const p0 = g.players[0], p1 = g.players[1];
 p0.x = 3.5; p0.y = 1.5; p0.range = 4;
+p0.bombLock = 0;
 p1.x = 5.5; p1.y = 1.5;
 // clear a horizontal lane so the flame reaches p1
 for (let c = 3; c <= 6; c++) g.grid[1 * COLS + c] = CELL.EMPTY;
@@ -59,6 +60,33 @@ ok(Array.isArray(round.grid) && round.grid.length === COLS * ROWS, 'snapshot gri
 ok(Array.isArray(round.players) && round.players[0].name === 'Rot', 'snapshot players ok');
 ok('shield' in round.players[0] && 'ghost' in round.players[0] && 'pierce' in round.players[0],
   'snapshot carries ability fields');
+
+console.log('round reset clears powerups but keeps score');
+{
+  const gg = createGame(defs, { seed: 31, winsToWin: 3 });
+  const p0 = gg.players[0], p1 = gg.players[1];
+  p0.maxBombs = 4; p0.range = 5; p0.speedPicks = 2; p0.pierce = true; p0.kick = true; p0.shield = 2; p0.ghost = 3;
+  p1.alive = false;
+  step(gg, TICK_DT); // resolves round, awards p0 one score
+  for (let i = 0; i < 200; i++) step(gg, TICK_DT); // advance through ROUND_END_DELAY
+  ok(gg.phase === 'playing' && gg.round === 2, 'new round started after roundover delay');
+  ok(p0.score === 1, 'score persists across rounds');
+  ok(p0.maxBombs === 1 && p0.range === 2 && p0.speedPicks === 0 && !p0.pierce && !p0.kick && p0.shield === 0 && p0.ghost === 0,
+    'all powerups reset at new round spawn');
+}
+
+console.log('spawn bomb lock prevents fat-finger self-bomb');
+{
+  const gg = createGame(defs, { seed: 33, winsToWin: 2 });
+  setInput(gg, 0, { bomb: true });
+  for (let i = 0; i < 30; i++) step(gg, TICK_DT); // first half-second: should still be locked
+  ok(gg.bombs.length === 0, 'cannot place a bomb immediately after spawning');
+  setInput(gg, 0, { bomb: false });
+  for (let i = 0; i < 40; i++) step(gg, TICK_DT); // pass one second total
+  setInput(gg, 0, { bomb: true });
+  step(gg, TICK_DT);
+  ok(gg.bombs.length === 1, 'can place a bomb after the spawn lock expires');
+}
 
 console.log('tile-stepping clips to the grid');
 {
@@ -128,6 +156,7 @@ console.log('PIERCE tears through multiple bricks');
   const gg = createGame(defs, { seed: 11, winsToWin: 2 });
   const pp = gg.players[0];
   pp.pierce = true; pp.range = 5;
+  pp.bombLock = 0;
   gg.hidden.clear();
   gg.grid[1 * COLS + 2] = CELL.BRICK;
   gg.grid[1 * COLS + 3] = CELL.BRICK;

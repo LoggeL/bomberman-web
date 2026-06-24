@@ -241,7 +241,7 @@ function tickOnline(frameDt) {
     // back through a bomb the server already blocks and rubber-band. Each entry
     // expires once the real bomb arrives in curSnap.bombs (or after a timeout).
     const nowMs = performance.now();
-    if (inp.bomb && !predBombHeld) {
+    if (inp.bomb && !predBombHeld && (sp.bombLock || 0) <= 0) {
       const bc = Math.round(predicted.x - 0.5), br = Math.round(predicted.y - 0.5);
       const dup = predBombs.some((b) => b.col === bc && b.row === br) ||
                   curSnap.bombs.some((b) => b.col === bc && b.row === br);

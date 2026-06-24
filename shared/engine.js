@@ -15,7 +15,7 @@ import {
   BASE_SPEED, SPEED_PER_PICKUP, MAX_SPEED_PICKUPS,
   START_BOMBS, START_RANGE, MAX_BOMBS, MAX_RANGE,
   MAX_SHIELD, SHIELD_INVULN, GHOST_TIME, KICK_SPEED,
-  SPAWNS, ROUND_END_DELAY, SUDDEN_DEATH_TIME,
+  SPAWNS, ROUND_END_DELAY, SUDDEN_DEATH_TIME, SPAWN_BOMB_LOCK,
 } from './constants.js';
 
 const PLAYER_HALF = 0.34; // half the player's collision box, in tiles (death/pickup checks)
@@ -77,6 +77,7 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
       invuln: 0,       // seconds of i-frames remaining after a shield pop
       score: 0,
       bombHeld: false,
+      bombLock: 0,      // spawn grace: prevents fat-finger bomb drops right after respawn
       // Tile-step movement state: a player rests on a cell centre and glides one
       // whole tile toward (tx, ty) while `stepping`.
       stepping: false,
@@ -142,12 +143,18 @@ function generateRound(state) {
     p.dir = 'down';
     p.alive = true;
     p.bombHeld = false;
+    p.bombLock = SPAWN_BOMB_LOCK;
     p.stepping = false;
     p.invuln = 0;
-    p.ghost = 0; // temporary buff — does not carry into the next round
+    // Power-ups are per-round only. Scores persist; upgrades reset on respawn.
+    p.maxBombs = START_BOMBS;
+    p.range = START_RANGE;
+    p.speedPicks = 0;
+    p.ghost = 0;
+    p.pierce = false;
+    p.shield = 0;
+    p.kick = false;
     p.moving = false;
-    // Note: permanent upgrades (bombs/range/speed/pierce/shield/kick) persist
-    // across rounds within a match — only per-round transient state resets here.
   }
 }
 
@@ -409,6 +416,7 @@ export function step(state, dt = TICK_DT) {
     if (!p.alive) continue;
     if (p.invuln > 0) p.invuln = Math.max(0, p.invuln - dt);
     if (p.ghost > 0) p.ghost = Math.max(0, p.ghost - dt);
+    if (p.bombLock > 0) p.bombLock = Math.max(0, p.bombLock - dt);
     const inp = p._input || {};
 
     // Kick a bomb we're walking into (before moving, so we stay put this tick
@@ -419,7 +427,7 @@ export function step(state, dt = TICK_DT) {
     stepPlayerGrid(state.grid, state.bombs, p, inp, dt);
 
     // bomb on rising edge — drops on the cell the player is centred over
-    if (inp.bomb && !p.bombHeld) placeBomb(state, p);
+    if (inp.bomb && !p.bombHeld && p.bombLock <= 0) placeBomb(state, p);
     p.bombHeld = !!inp.bomb;
 
     // pick up a powerup on the player's centre tile
@@ -568,7 +576,8 @@ export function toSnapshot(state) {
       slot: p.slot, name: p.name, x: p.x, y: p.y, dir: p.dir,
       alive: p.alive, maxBombs: p.maxBombs, range: p.range,
       speedPicks: p.speedPicks, ghost: p.ghost, pierce: p.pierce,
-      shield: p.shield, kick: p.kick, invuln: p.invuln, score: p.score, moving: p.moving,
+      shield: p.shield, kick: p.kick, invuln: p.invuln, bombLock: p.bombLock,
+      score: p.score, moving: p.moving,
     })),
     bombs: state.bombs.map((b) => ({
       id: b.id, col: b.col, row: b.row, x: b.x, y: b.y,
