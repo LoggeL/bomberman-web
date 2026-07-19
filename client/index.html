@@ -50,7 +50,7 @@
     <section class="screen" id="screen-menu" data-screen="menu">
       <div class="panel menu-panel">
         <h1 class="logo">BOMB<span class="logo-accent">ER</span>MAN</h1>
-        <p class="tagline">Neon Arena — 2&ndash;4 Spieler</p>
+        <p class="tagline">Lokal 2 Spieler · Online 2&ndash;4 Spieler</p>
 
         <div class="menu-buttons">
           <button class="btn btn-primary" id="btn-goto-local">Lokal spielen</button>
@@ -66,8 +66,6 @@
             <tbody>
               <tr><td><span class="dot" style="--c:#ff5470"></span>Rot</td><td>W A S D</td><td>Leertaste</td></tr>
               <tr><td><span class="dot" style="--c:#3fb6ff"></span>Blau</td><td>Pfeiltasten</td><td>Enter</td></tr>
-              <tr><td><span class="dot" style="--c:#5dd95d"></span>Grün</td><td>I J K L</td><td>U</td></tr>
-              <tr><td><span class="dot" style="--c:#ffcf3f"></span>Gelb</td><td>T F G H</td><td>R</td></tr>
             </tbody>
           </table>
         </div>
@@ -96,10 +94,8 @@
 
         <div class="field">
           <label>Anzahl Spieler</label>
-          <div class="seg" id="seg-players" role="group" aria-label="Anzahl Spieler">
-            <button class="seg-btn" data-val="2">2</button>
-            <button class="seg-btn is-active" data-val="3">3</button>
-            <button class="seg-btn" data-val="4">4</button>
+          <div class="seg" id="seg-players" role="group" aria-label="Anzahl Spieler, lokal maximal zwei">
+            <button class="seg-btn is-active" data-val="2">2</button>
           </div>
         </div>
 

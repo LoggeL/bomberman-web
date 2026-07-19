@@ -77,6 +77,7 @@ let pickupPopups = [];        // newest pickup effect label per player
 // point doing the comparisons more than a dozen times a second).
 let lastHudAt = 0;
 const HUD_INTERVAL = 0.08; // seconds (~12.5 Hz)
+const LOCAL_PLAYER_COUNT = 2;
 
 // Render OTHER players this far in the past so two buffered snapshots always
 // bracket the render time — this absorbs network jitter / late packets so
@@ -104,10 +105,11 @@ const ui = createUI({
 // ===========================================================================
 // LOCAL MODE
 // ===========================================================================
-function startLocal(numPlayers, winsToWin) {
+function startLocal(_numPlayers, winsToWin) {
   teardownOnline();
   teardownLocal();
 
+  const numPlayers = LOCAL_PLAYER_COUNT;
   const defs = [];
   localSlots = [];
   for (let slot = 0; slot < numPlayers; slot++) {

@@ -29,8 +29,76 @@ import {
 } from '../../shared/constants.js';
 import { getArenaVisual } from './arena-visuals.js';
 
+const PLAYER_SPRITE_URLS = [
+  '/sprites/player-red.webp',
+  '/sprites/player-blue.webp',
+  '/sprites/player-green.webp',
+  '/sprites/player-yellow.webp',
+];
+
+const ARENA_TILE_URLS = Object.freeze({
+  neon: '/tiles/neon-tiles.webp',
+  foundry: '/tiles/foundry-tiles.webp',
+  frost: '/tiles/frost-tiles.webp',
+  reactor: '/tiles/reactor-tiles.webp',
+});
+
+// Player sheets are 4×2:
+//   down A/B, right A/B
+//   left A/B, up A/B
+const PLAYER_FRAMES = Object.freeze({
+  down: Object.freeze({ col: 0, row: 0 }),
+  left: Object.freeze({ col: 0, row: 1 }),
+  right: Object.freeze({ col: 2, row: 0 }),
+  up: Object.freeze({ col: 2, row: 1 }),
+});
+
+// The generated poses are not perfectly centred inside their source cells.
+// Anchor each frame at the character's visual centre and foot line so changing
+// walk phase animates the limbs without making the whole player wobble.
+const PLAYER_FRAME_ANCHORS = Object.freeze({
+  down: Object.freeze([
+    Object.freeze({ x: 0.622, y: 0.833 }),
+    Object.freeze({ x: 0.539, y: 0.834 }),
+  ]),
+  right: Object.freeze([
+    Object.freeze({ x: 0.455, y: 0.834 }),
+    Object.freeze({ x: 0.375, y: 0.828 }),
+  ]),
+  left: Object.freeze([
+    Object.freeze({ x: 0.561, y: 0.740 }),
+    Object.freeze({ x: 0.467, y: 0.734 }),
+  ]),
+  up: Object.freeze([
+    Object.freeze({ x: 0.433, y: 0.736 }),
+    Object.freeze({ x: 0.358, y: 0.742 }),
+  ]),
+});
+
+const POWERUP_ATLAS_CELLS = Object.freeze({
+  [POWERUP.BOMB]: Object.freeze({ col: 0, row: 0 }),
+  [POWERUP.RANGE]: Object.freeze({ col: 1, row: 0 }),
+  [POWERUP.SPEED]: Object.freeze({ col: 2, row: 0 }),
+  [POWERUP.GHOST]: Object.freeze({ col: 3, row: 0 }),
+  [POWERUP.PIERCE]: Object.freeze({ col: 0, row: 1 }),
+  [POWERUP.SHIELD]: Object.freeze({ col: 1, row: 1 }),
+  [POWERUP.KICK]: Object.freeze({ col: 2, row: 1 }),
+});
+
+function loadImage(src) {
+  const image = new Image();
+  image.decoding = 'async';
+  image.src = src;
+  return image;
+}
+
 export function createRenderer(canvas) {
   const ctx = canvas.getContext('2d');
+  const playerSprites = PLAYER_SPRITE_URLS.map(loadImage);
+  const powerupAtlas = loadImage('/sprites/modern-arcade-atlas.webp');
+  const arenaTileAtlases = Object.fromEntries(
+    Object.entries(ARENA_TILE_URLS).map(([id, src]) => [id, loadImage(src)]),
+  );
 
   // Layout (recomputed on resize): tile size + board origin in CSS pixels.
   let dpr = 1;
@@ -55,6 +123,16 @@ export function createRenderer(canvas) {
   // The terrain layer is keyed by a signature of the grid contents; when the
   // signature is unchanged we skip the (relatively pricey) terrain rebuild.
   let terrainSig = null;
+
+  // Tile atlases may arrive after the first frame. Refresh the cached static
+  // layers as each image becomes available so the procedural fallback is
+  // replaced without waiting for a resize or round transition.
+  for (const image of Object.values(arenaTileAtlases)) {
+    image.addEventListener('load', () => {
+      renderFloorLayer(activeArenaVisual.palette, activeArenaVisual.id);
+      terrainSig = null;
+    }, { once: true });
+  }
 
   // A monotonic clock for animations (pulsing bombs, flame flicker, etc.).
   const startTime = performance.now();
@@ -107,7 +185,7 @@ export function createRenderer(canvas) {
     terrainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     // The floor is fully determined by layout and the active arena palette.
-    renderFloorLayer(activeArenaVisual.palette);
+    renderFloorLayer(activeArenaVisual.palette, activeArenaVisual.id);
     // ...and force the terrain layer to rebuild on the next draw().
     terrainSig = null;
   }
@@ -134,6 +212,53 @@ export function createRenderer(canvas) {
     return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
   }
 
+  function imageReady(image) {
+    return image?.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
+  }
+
+  function drawSpriteCell(image, col, row, cols, rows, x, y, width, height) {
+    if (!imageReady(image)) return false;
+    const sourceWidth = image.naturalWidth / cols;
+    const sourceHeight = image.naturalHeight / rows;
+    ctx.drawImage(
+      image,
+      col * sourceWidth,
+      row * sourceHeight,
+      sourceWidth,
+      sourceHeight,
+      x,
+      y,
+      width,
+      height,
+    );
+    return true;
+  }
+
+  function drawAtlasCell(c, image, col, row, cols, rows, x, y, width, height) {
+    if (!imageReady(image)) return false;
+    const cellWidth = image.naturalWidth / cols;
+    const cellHeight = image.naturalHeight / rows;
+    // Trim half a source pixel from each edge to prevent texture bleeding from
+    // neighbouring atlas cells while the browser downsamples to board tiles.
+    const inset = 0.5;
+    c.drawImage(
+      image,
+      col * cellWidth + inset,
+      row * cellHeight + inset,
+      cellWidth - inset * 2,
+      cellHeight - inset * 2,
+      x,
+      y,
+      width,
+      height,
+    );
+    return true;
+  }
+
+  function tileVariant(col, row, salt = 0) {
+    return (col * 7 + row * 11 + salt) & 1;
+  }
+
   function getFont() {
     return "'Segoe UI', system-ui, sans-serif";
   }
@@ -143,7 +268,7 @@ export function createRenderer(canvas) {
   // Renders the board backdrop/frame glow, the checkerboard, and the faint grid
   // lines into the floor offscreen canvas. The frame glow uses shadowBlur, but
   // because it's baked here it costs nothing per frame.
-  function renderFloorLayer(palette) {
+  function renderFloorLayer(palette, visualId) {
     const c = floorCtx;
     c.clearRect(0, 0, viewW, viewH);
 
@@ -163,11 +288,16 @@ export function createRenderer(canvas) {
     roundRect(c, originX, originY, boardW, boardH, 8);
     c.clip();
 
-    // Subtle checkerboard so motion is readable.
+    // Each arena has two seamless floor variants. Keep the old checkerboard as
+    // an immediate fallback while the atlas is loading or if an asset fails.
+    const atlas = arenaTileAtlases[visualId];
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
-        c.fillStyle = (col + row) % 2 === 0 ? palette.floorA : palette.floorB;
-        c.fillRect(px(col), py(row), tile, tile);
+        const variant = tileVariant(col, row);
+        if (!drawAtlasCell(c, atlas, 0, variant, 3, 2, px(col), py(row), tile, tile)) {
+          c.fillStyle = variant === 0 ? palette.floorA : palette.floorB;
+          c.fillRect(px(col), py(row), tile, tile);
+        }
       }
     }
 
@@ -205,7 +335,7 @@ export function createRenderer(canvas) {
     return sig;
   }
 
-  function renderTerrainLayer(grid, palette) {
+  function renderTerrainLayer(grid, palette, visualId) {
     const c = terrainCtx;
     c.clearRect(0, 0, viewW, viewH);
 
@@ -218,17 +348,30 @@ export function createRenderer(canvas) {
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
         const v = grid[row * COLS + col];
-        if (v === CELL.SOLID) drawSolid(c, col, row, palette);
-        else if (v === CELL.BRICK) drawBrick(c, col, row, palette);
+        if (v === CELL.SOLID) drawSolid(c, col, row, palette, visualId);
+        else if (v === CELL.BRICK) drawBrick(c, col, row, palette, visualId);
       }
     }
 
     c.restore();
   }
 
-  function drawSolid(c, col, row, palette) {
+  function drawSolid(c, col, row, palette, visualId) {
     const x = px(col), y = py(row);
     const t = tile;
+    if (drawAtlasCell(
+      c,
+      arenaTileAtlases[visualId],
+      1,
+      tileVariant(col, row, 1),
+      3,
+      2,
+      x,
+      y,
+      t,
+      t,
+    )) return;
+
     // 3D-ish bevelled pillar.
     c.fillStyle = palette.solidBase;
     roundRect(c, x + 1, y + 1, t - 2, t - 2, 5);
@@ -248,9 +391,22 @@ export function createRenderer(canvas) {
     c.stroke();
   }
 
-  function drawBrick(c, col, row, palette) {
+  function drawBrick(c, col, row, palette, visualId) {
     const x = px(col), y = py(row);
     const t = tile;
+    if (drawAtlasCell(
+      c,
+      arenaTileAtlases[visualId],
+      2,
+      tileVariant(col, row, 2),
+      3,
+      2,
+      x,
+      y,
+      t,
+      t,
+    )) return;
+
     c.fillStyle = palette.brickBase;
     roundRect(c, x + 1, y + 1, t - 2, t - 2, 4);
     c.fill();
@@ -308,6 +464,29 @@ export function createRenderer(canvas) {
     roundRect(ctx, x - r, cy - r, r * 2, r * 2, r * 0.5);
     ctx.stroke();
     ctx.restore();
+
+    const atlasCell = POWERUP_ATLAS_CELLS[kind];
+    if (atlasCell && imageReady(powerupAtlas)) {
+      const width = tile * 0.9;
+      const height = width * (powerupAtlas.naturalHeight / 2) /
+        (powerupAtlas.naturalWidth / 4);
+      ctx.save();
+      ctx.shadowColor = color;
+      ctx.shadowBlur = tile * 0.18;
+      drawSpriteCell(
+        powerupAtlas,
+        atlasCell.col,
+        atlasCell.row,
+        4,
+        2,
+        x - width / 2,
+        cy - height / 2,
+        width,
+        height,
+      );
+      ctx.restore();
+      return;
+    }
 
     // icon
     ctx.save();
@@ -541,12 +720,45 @@ export function createRenderer(canvas) {
 
   // ---- players (dynamic) ----------------------------------------------------
 
+  function drawPlayerSprite(p, x, y, color) {
+    const image = playerSprites[p.slot];
+    const direction = PLAYER_FRAMES[p.dir] ? p.dir : 'down';
+    const frame = PLAYER_FRAMES[direction];
+    const phase = p.moving && p.alive ? Math.floor(now() * 8) % 2 : 0;
+    if (!imageReady(image)) return false;
+
+    const width = tile * 1.55;
+    const height = width * (image.naturalHeight / 2) / (image.naturalWidth / 4);
+    const anchor = PLAYER_FRAME_ANCHORS[direction][phase];
+    const sourceCol = frame.col + phase;
+    const sourceWidth = image.naturalWidth / 4;
+    const sourceHeight = image.naturalHeight / 2;
+    const footY = y + tile * 0.36;
+
+    ctx.shadowColor = color;
+    ctx.shadowBlur = p.alive ? tile * 0.22 : 0;
+    ctx.drawImage(
+      image,
+      sourceCol * sourceWidth,
+      frame.row * sourceHeight,
+      sourceWidth,
+      sourceHeight,
+      x - anchor.x * width,
+      footY - anchor.y * height,
+      width,
+      height,
+    );
+    ctx.shadowBlur = 0;
+    return true;
+  }
+
   function drawPlayer(p, isLocal) {
     const x = px(0) + p.x * tile; // p.x already includes the +0.5 centre offset
     const y = py(0) + p.y * tile;
     const r = tile * 0.34;
     const color = PLAYER_COLORS[p.slot] || '#ffffff';
     const [cr, cg, cb] = hexToRgb(color);
+    const hasPlayerSprite = imageReady(playerSprites[p.slot]);
 
     ctx.save();
     if (!p.alive) ctx.globalAlpha = 0.28;                 // faded when dead
@@ -579,50 +791,55 @@ export function createRenderer(canvas) {
       ctx.shadowColor = '#3fe0ff';
       ctx.shadowBlur = tile * 0.3;
       ctx.beginPath();
-      ctx.arc(x, y, r * 1.28, 0, Math.PI * 2);
+      const shieldY = y - (hasPlayerSprite ? tile * 0.24 : 0);
+      const shieldRadius = hasPlayerSprite ? tile * 0.72 : r * 1.28;
+      ctx.arc(x, shieldY, shieldRadius, 0, Math.PI * 2);
       ctx.stroke();
       ctx.shadowBlur = 0;
     }
 
     // little bobbing while moving
-    const bob = p.moving && p.alive ? Math.sin(now() * 12) * tile * 0.04 : 0;
+    const bob = !hasPlayerSprite && p.moving && p.alive
+      ? Math.sin(now() * 12) * tile * 0.04
+      : 0;
     const by = y + bob;
 
-    // body — a rounded capsule "character"
-    ctx.fillStyle = color;
-    if (p.alive) {
-      ctx.shadowColor = color;
-      ctx.shadowBlur = tile * 0.25;
-    }
-    roundRect(ctx, x - r * 0.78, by - r, r * 1.56, r * 1.9, r * 0.7);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-
-    // belly highlight
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
-    roundRect(ctx, x - r * 0.5, by - r * 0.7, r * 1.0, r * 0.7, r * 0.4);
-    ctx.fill();
-
-    // face — eyes that look in the facing direction
-    let ex = 0, ey = 0;
-    if (p.dir === 'left') ex = -r * 0.22;
-    else if (p.dir === 'right') ex = r * 0.22;
-    else if (p.dir === 'up') ey = -r * 0.18;
-    else ey = r * 0.1;
-
-    const eyeY = by - r * 0.3 + ey * 0.4;
-    const eyeDX = r * 0.32;
-    ctx.fillStyle = '#ffffff';
-    for (const sx of [-1, 1]) {
-      ctx.beginPath();
-      ctx.arc(x + sx * eyeDX, eyeY, r * 0.24, 0, Math.PI * 2);
+    const usedSprite = drawPlayerSprite(p, x, by, color);
+    if (!usedSprite) {
+      // Lightweight procedural fallback while the image sheet is loading.
+      ctx.fillStyle = color;
+      if (p.alive) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = tile * 0.25;
+      }
+      roundRect(ctx, x - r * 0.78, by - r, r * 1.56, r * 1.9, r * 0.7);
       ctx.fill();
-    }
-    ctx.fillStyle = '#0b0f1a';
-    for (const sx of [-1, 1]) {
-      ctx.beginPath();
-      ctx.arc(x + sx * eyeDX + ex * 0.6, eyeY + ey * 0.6, r * 0.12, 0, Math.PI * 2);
+      ctx.shadowBlur = 0;
+
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.18)';
+      roundRect(ctx, x - r * 0.5, by - r * 0.7, r * 1.0, r * 0.7, r * 0.4);
       ctx.fill();
+
+      let ex = 0, ey = 0;
+      if (p.dir === 'left') ex = -r * 0.22;
+      else if (p.dir === 'right') ex = r * 0.22;
+      else if (p.dir === 'up') ey = -r * 0.18;
+      else ey = r * 0.1;
+
+      const eyeY = by - r * 0.3 + ey * 0.4;
+      const eyeDX = r * 0.32;
+      ctx.fillStyle = '#ffffff';
+      for (const sx of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(x + sx * eyeDX, eyeY, r * 0.24, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#0b0f1a';
+      for (const sx of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(x + sx * eyeDX + ex * 0.6, eyeY + ey * 0.6, r * 0.12, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     ctx.restore();
@@ -634,7 +851,7 @@ export function createRenderer(canvas) {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     const label = p.name || `P${p.slot + 1}`;
-    const ty = by - r * 1.25;
+    const ty = by - (usedSprite ? tile * 0.94 : r * 1.25);
     ctx.lineWidth = 3;
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.strokeText(label, x, ty);
@@ -739,7 +956,7 @@ export function createRenderer(canvas) {
     const nextArenaVisual = getArenaVisual(snap.arena);
     if (nextArenaVisual.id !== activeArenaVisual.id) {
       activeArenaVisual = nextArenaVisual;
-      renderFloorLayer(activeArenaVisual.palette);
+      renderFloorLayer(activeArenaVisual.palette, activeArenaVisual.id);
       terrainSig = null;
     }
 
@@ -751,7 +968,7 @@ export function createRenderer(canvas) {
     // Rebuild terrain only when the grid contents, tile size, or theme changed.
     const sig = gridSignature(snap.grid, activeArenaVisual.id);
     if (sig !== terrainSig) {
-      renderTerrainLayer(snap.grid, activeArenaVisual.palette);
+      renderTerrainLayer(snap.grid, activeArenaVisual.palette, activeArenaVisual.id);
       terrainSig = sig;
     }
     ctx.drawImage(terrainCanvas, 0, 0, viewW, viewH);
