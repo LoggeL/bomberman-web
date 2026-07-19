@@ -11,6 +11,7 @@ import {
   rebaseWithVisualCorrection,
 } from '../client/src/sync.js';
 import { DEFAULT_ARENA_VISUAL, getArenaVisual } from '../client/src/arena-visuals.js';
+import { MUSIC_TRACKS, resolveMusicTrack } from '../client/src/music.js';
 import { findPickupEffects, getPickupEffect } from '../client/src/pickup-effects.js';
 import { COLS, ROWS, CELL } from '../shared/constants.js';
 
@@ -181,6 +182,24 @@ console.log('arena visuals resolve snapshots and safely fall back');
     'theme metadata selects the switchyard presentation');
   ok(getArenaVisual({ id: 'future-arena' }) === DEFAULT_ARENA_VISUAL,
     'unknown arenas keep the neon fallback');
+}
+
+console.log('each arena resolves a distinct soundtrack');
+{
+  const arenas = [
+    { id: 'classic', theme: 'neon' },
+    { id: 'crossroads', theme: 'foundry' },
+    { id: 'citadel', theme: 'frost' },
+    { id: 'switchyard', theme: 'reactor' },
+  ];
+  const trackIds = arenas.map((arena) => resolveMusicTrack(arena).id);
+  ok(new Set(trackIds).size === arenas.length,
+    'all four arenas have their own music identity');
+  ok(trackIds.every((id) => MUSIC_TRACKS[id]?.bpm > 0),
+    'every arena track has a valid tempo and sequencer definition');
+  ok(resolveMusicTrack(arenas[0], true).id === 'sudden-death' &&
+     resolveMusicTrack(arenas[3], true).id === 'sudden-death',
+    'sudden death consistently overrides every arena soundtrack');
 }
 
 console.log(failed === 0 ? '\nALL SYNC TESTS PASSED' : `\n${failed} SYNC TEST(S) FAILED`);

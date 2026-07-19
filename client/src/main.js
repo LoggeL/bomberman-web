@@ -6,7 +6,7 @@
 //              client-side *predict* our own player so it responds instantly.
 
 import { createGame, step, setInput, toSnapshot, stepPlayerGrid } from '../../shared/engine.js';
-import { MIN_PLAYERS, TICK_DT } from '../../shared/constants.js';
+import { MIN_PLAYERS, SUDDEN_DEATH_TIME, TICK_DT } from '../../shared/constants.js';
 import { SNAPSHOT_HZ } from '../../shared/protocol.js';
 import { createRenderer } from './render.js';
 import { createUI } from './ui.js';
@@ -108,6 +108,7 @@ const ui = createUI({
 function startLocal(_numPlayers, winsToWin) {
   teardownOnline();
   teardownLocal();
+  sound.stopMusic();
 
   const numPlayers = LOCAL_PLAYER_COUNT;
   const defs = [];
@@ -151,6 +152,7 @@ function stepLocal(frameDt) {
   }
 
   const snap = toSnapshot(localGame);
+  syncSnapshotMusic(snap);
   detectEvents(localEventSnap, snap);
   localEventSnap = snap;
 
@@ -177,6 +179,7 @@ function stepLocal(frameDt) {
 function connectAndJoin(name, room, winsToWin) {
   teardownLocal();
   resetOnlineState();
+  sound.stopMusic();
   mode = 'online';
 
   net = createNet({
@@ -217,6 +220,7 @@ function connectAndJoin(name, room, winsToWin) {
       // Detect SFX/shake events against the previously-held server snapshot,
       // then buffer this one for interpolation and reconcile our prediction.
       const discontinuity = isSnapshotDiscontinuity(curSnap, snap);
+      syncSnapshotMusic(snap);
       detectEvents(discontinuity ? null : curSnap, snap);
       if (discontinuity) {
         // Respawns are teleports by design. Blending a dead position from the
@@ -420,6 +424,14 @@ function sameInput(a, b) {
 // ===========================================================================
 // Both modes ultimately diff two consecutive snapshots; this keeps the audio
 // and screen-shake logic in one place and identical for local and online play.
+function syncSnapshotMusic(snap) {
+  if (!snap || snap.phase !== 'playing') {
+    sound.stopMusic();
+    return;
+  }
+  sound.syncMusic(snap.arena, { suddenDeath: snap.t >= SUDDEN_DEATH_TIME });
+}
+
 function detectEvents(prev, snap) {
   if (!prev || !snap || prev === snap) return;
 
@@ -555,6 +567,7 @@ function onRestart() {
 function backToMenu() {
   teardownLocal();
   teardownOnline();
+  sound.stopMusic();
   setTouchControlsVisible(false);
   mode = 'menu';
   curSnap = null;

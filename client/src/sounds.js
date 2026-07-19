@@ -1,7 +1,7 @@
 // Procedural Web Audio sound system — zero asset files.
 //
 // createSound() -> { unlock(), play(name, opts), setMuted(b), toggleMuted(),
-//                    isMuted() }
+//                    isMuted(), syncMusic(arena, opts), stopMusic() }
 //
 // Every effect is synthesised on the fly from oscillators, gain envelopes and
 // short noise buffers, then routed through:
@@ -13,6 +13,8 @@
 // gesture (unlock) or first play() — never at module load, because browsers
 // emit an autoplay warning for contexts created without a gesture. If Web Audio
 // is missing or throws, every method silently degrades to a no-op.
+
+import { createMusicSequencer, resolveMusicTrack } from './music.js';
 
 const MUTE_KEY = 'bomberman.muted';
 const MASTER_GAIN = 0.35;     // modest headroom so the limiter rarely engages
@@ -27,6 +29,8 @@ export function createSound() {
   let ctx = null;
   let master = null;            // master GainNode
   let limiter = null;           // DynamicsCompressorNode acting as a limiter
+  let music = null;             // independently crossfaded arena sequencer
+  let musicTarget = null;       // desired track id, retained while muted
   let noiseBuf = null;          // cached white-noise buffer (explosion/death)
   let active = 0;               // currently-live source count (voice cap)
   let dead = false;             // Web Audio unavailable — permanent no-op
@@ -54,6 +58,7 @@ export function createSound() {
 
       master.connect(limiter);
       limiter.connect(ctx.destination);
+      music = createMusicSequencer(ctx, master);
     } catch {
       // Construction failed — never try again, stay silent.
       dead = true;
@@ -211,8 +216,9 @@ export function createSound() {
     if (!ensureCtx()) return;
     if (ctx.state === 'suspended') {
       // resume() returns a promise; swallow rejections (e.g. no gesture yet).
-      ctx.resume().catch(() => {});
+      ctx.resume().then(startPendingMusic).catch(() => {});
     }
+    startPendingMusic();
   }
 
   function play(name, opts) {
@@ -221,6 +227,7 @@ export function createSound() {
     if (!make) return;                 // unknown name -> no-op
     if (!ensureCtx()) return;
     if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    startPendingMusic();
 
     // Voice cap: drop new sounds when saturated so spam can't melt the mix.
     // (Every effect here is "non-critical" enough to skip under heavy load.)
@@ -237,6 +244,8 @@ export function createSound() {
   function setMuted(b) {
     muted = !!b;
     writeMuted(muted);
+    if (muted) music?.stop();
+    else startPendingMusic();
   }
 
   function toggleMuted() {
@@ -248,7 +257,30 @@ export function createSound() {
     return muted;
   }
 
-  return { unlock, play, setMuted, toggleMuted, isMuted };
+  function startPendingMusic() {
+    if (!muted && music && musicTarget) music.setTrack(musicTarget);
+  }
+
+  function syncMusic(arenaLike, { suddenDeath = false } = {}) {
+    const track = resolveMusicTrack(arenaLike, suddenDeath);
+    musicTarget = track.id;
+    startPendingMusic();
+  }
+
+  function stopMusic() {
+    musicTarget = null;
+    music?.stop();
+  }
+
+  return {
+    unlock,
+    play,
+    setMuted,
+    toggleMuted,
+    isMuted,
+    syncMusic,
+    stopMusic,
+  };
 }
 
 // ---------------------------------------------------------------------------
