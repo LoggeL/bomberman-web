@@ -93,6 +93,11 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
 // Builds a fresh map and respawns every player to their corner.
 function generateRound(state) {
   const g = state.grid;
+  // `time` is elapsed time for the CURRENT round (it is exposed as `snap.t`
+  // and drives sudden death/the HUD), not the lifetime of the match.
+  state.time = 0;
+  state.phaseTimer = 0;
+  state.winner = null;
   state.hidden.clear();
   state.powerups.clear();
   state.bombs.length = 0;
@@ -145,6 +150,8 @@ function generateRound(state) {
     p.bombHeld = false;
     p.bombLock = SPAWN_BOMB_LOCK;
     p.stepping = false;
+    p.tx = p.x;
+    p.ty = p.y;
     p.invuln = 0;
     // Power-ups are per-round only. Scores persist; upgrades reset on respawn.
     p.maxBombs = START_BOMBS;
@@ -398,18 +405,17 @@ function addFlame(state, col, row, kind, orient) {
 
 // Advances the simulation by one fixed tick. Call repeatedly with TICK_DT.
 export function step(state, dt = TICK_DT) {
-  state.time += dt;
-
   if (state.phase === 'roundover' || state.phase === 'matchover') {
     state.phaseTimer -= dt;
     if (state.phase === 'roundover' && state.phaseTimer <= 0) {
       state.round += 1;
       generateRound(state);
       state.phase = 'playing';
-      state.winner = null;
     }
     return;
   }
+
+  state.time += dt;
 
   // 1. movement + bomb placement
   for (const p of state.players) {
@@ -578,9 +584,13 @@ export function toSnapshot(state) {
       speedPicks: p.speedPicks, ghost: p.ghost, pierce: p.pierce,
       shield: p.shield, kick: p.kick, invuln: p.invuln, bombLock: p.bombLock,
       score: p.score, moving: p.moving,
+      // Movement internals let an online client resume prediction from the
+      // exact authoritative point in a tile step instead of rounding to a cell.
+      stepping: p.stepping, tx: p.tx, ty: p.ty,
     })),
     bombs: state.bombs.map((b) => ({
       id: b.id, col: b.col, row: b.row, x: b.x, y: b.y,
+      owner: b.owner,
       vx: b.vx, vy: b.vy, timer: b.timer, range: b.range, pierce: b.pierce,
     })),
     flames: state.flames.map((f) => ({ col: f.col, row: f.row, kind: f.kind, orient: f.orient })),

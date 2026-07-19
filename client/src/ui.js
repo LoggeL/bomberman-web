@@ -121,7 +121,11 @@ export function createUI(callbacks = {}) {
     onlineSetup.hidden = true;
     onlineRoom.hidden = false;
     $('room-code-value').textContent = room;
-    $('btn-start-online').hidden = !host;
+    const startBtn = $('btn-start-online');
+    startBtn.hidden = !host;
+    // JOINED tells us who the host is, but the following LOBBY payload is the
+    // authority on whether the room can actually start.
+    startBtn.disabled = true;
     show('online');
   }
 
@@ -153,9 +157,12 @@ export function createUI(callbacks = {}) {
       `;
       list.appendChild(li);
     }
-    // Host can start once everyone's ready and there are enough players.
+    // Recompute host controls from every authoritative lobby payload. This also
+    // promotes the next player immediately when the previous host disconnects.
     const startBtn = $('btn-start-online');
-    if (!startBtn.hidden) startBtn.disabled = !data.canStart;
+    const amHost = data.host === mySlot;
+    startBtn.hidden = !amHost;
+    startBtn.disabled = !amHost || !data.canStart;
 
     const me = data.players.find((p) => p.slot === mySlot);
     if (me) { myReady = !!me.ready; syncReadyBtn(); }
@@ -163,7 +170,7 @@ export function createUI(callbacks = {}) {
     const hint = $('lobby-hint');
     if (data.players.length < 2) hint.textContent = 'Warte auf mindestens einen weiteren Spieler…';
     else if (!data.canStart) hint.textContent = 'Warte, bis alle bereit sind…';
-    else if (startBtn.hidden) hint.textContent = 'Bereit! Der Host kann starten.';
+    else if (!amHost) hint.textContent = 'Bereit! Der Host kann starten.';
     else hint.textContent = 'Alle bereit — du kannst starten!';
   }
 
@@ -275,10 +282,61 @@ export function createUI(callbacks = {}) {
   }
 
   // ---- result -------------------------------------------------------------
-  $('btn-rematch').addEventListener('click', () => cb.onRestart && cb.onRestart());
+  const restartBtn = $('btn-rematch');
+  let resultAction = {
+    visible: false,
+    canRestart: false,
+    waitingForHost: false,
+    waitingForPlayers: false,
+    pending: false,
+  };
+
+  function syncResultAction() {
+    restartBtn.hidden = !resultAction.visible;
+    restartBtn.disabled = !resultAction.canRestart || resultAction.pending;
+    if (resultAction.pending) restartBtn.textContent = 'Starte…';
+    else if (resultAction.waitingForPlayers) restartBtn.textContent = 'Warte auf Spieler…';
+    else if (resultAction.waitingForHost) restartBtn.textContent = 'Warte auf Host…';
+    else restartBtn.textContent = 'Revanche';
+  }
+
+  // Update only the result action, without rebuilding the winner/scoreboard.
+  // Main uses this when online host ownership changes while matchover is open.
+  function setResultAction({
+    visible = resultAction.visible,
+    canRestart = resultAction.canRestart,
+    waitingForHost = resultAction.waitingForHost,
+    waitingForPlayers = resultAction.waitingForPlayers,
+    pending = resultAction.pending,
+  } = {}) {
+    resultAction = {
+      visible: !!visible,
+      canRestart: !!canRestart,
+      waitingForHost: !!waitingForHost,
+      waitingForPlayers: !!waitingForPlayers,
+      pending: !!pending,
+    };
+    syncResultAction();
+  }
+
+  function setRestartPending(pending = true) {
+    setResultAction({ pending });
+  }
+
+  restartBtn.addEventListener('click', () => {
+    if (!resultAction.canRestart || resultAction.pending) return;
+    // Disable synchronously so a double-click cannot emit two restart intents.
+    setRestartPending(true);
+    if (cb.onRestart) cb.onRestart();
+  });
   $('btn-result-menu').addEventListener('click', () => cb.onBackToMenu && cb.onBackToMenu());
 
-  function showResult(snap) {
+  function showResult(snap, {
+    canRestart = false,
+    waitingForHost = false,
+    waitingForPlayers = false,
+    restartPending = false,
+  } = {}) {
     const title = $('result-title');
     const winnerEl = $('result-winner');
     const isMatch = snap.phase === 'matchover';
@@ -310,8 +368,16 @@ export function createUI(callbacks = {}) {
       scores.appendChild(row);
     }
 
-    // Rematch only really makes sense after the whole match.
-    $('btn-rematch').textContent = isMatch ? 'Revanche' : 'Weiter';
+    // Round transitions are automatic, so they deliberately have no action
+    // button. At matchover the caller decides whether this client may restart
+    // (local player / online host) or must wait for the online host.
+    setResultAction({
+      visible: isMatch,
+      canRestart: isMatch && canRestart,
+      waitingForHost: isMatch && waitingForHost,
+      waitingForPlayers: isMatch && waitingForPlayers,
+      pending: isMatch && restartPending,
+    });
     show('result');
   }
 
@@ -352,6 +418,8 @@ export function createUI(callbacks = {}) {
     updateHud,
     resetHud,
     showResult,
+    setResultAction,
+    setRestartPending,
     showError,
     // expose so main can read the selected name if it needs to reconnect
     getName: playerName,

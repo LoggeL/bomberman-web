@@ -128,8 +128,9 @@ Valid phases: `playing` → `roundover` → `playing` … → `matchover`.
 
 ## 6. Sudden death
 
-To break stalemates, once `state.time` passes `SUDDEN_DEATH_TIME` (90 s) the
-arena begins to collapse. The engine precomputes an **inward spiral** of every
+To break stalemates, once the current round's `state.time` passes
+`SUDDEN_DEATH_TIME` (90 s) the arena begins to collapse. The clock and collapse
+state reset whenever a fresh round is generated. The engine precomputes an **inward spiral** of every
 interior cell and, every ~0.18 s, converts the next cell along the spiral to
 `SOLID`:
 
@@ -176,15 +177,18 @@ rendering share one code path. Snapshot player coordinates are in tile units
 
 ```jsonc
 {
-  "t", "phase",            // 'playing' | 'roundover' | 'matchover'
+  "t",                     // elapsed seconds in the current round
+  "phase",                 // 'playing' | 'roundover' | 'matchover'
   "round", "phaseTimer",
   "winner",                // slot | null
   "matchWinner", "winsToWin",
   "grid":     [/* COLS*ROWS CELL values, index = row*COLS+col */],
   "powerups": [{ "col", "row", "kind" }],
   "players":  [{ "slot", "name", "x", "y", "dir", "alive",
-                 "maxBombs", "range", "speedPicks", "score", "moving" }],
-  "bombs":    [{ "col", "row", "timer", "range" }],
+                 "maxBombs", "range", "speedPicks", "score", "moving",
+                 "stepping", "tx", "ty" }],
+  "bombs":    [{ "id", "owner", "col", "row", "x", "y",
+                 "vx", "vy", "timer", "range" }],
   "flames":   [{ "col", "row", "kind", "orient" }]
 }
 ```

@@ -6,13 +6,22 @@
 //              client-side *predict* our own player so it responds instantly.
 
 import { createGame, step, setInput, toSnapshot, stepPlayerGrid } from '../../shared/engine.js';
-import { TICK_DT } from '../../shared/constants.js';
+import { MIN_PLAYERS, TICK_DT } from '../../shared/constants.js';
 import { SNAPSHOT_HZ } from '../../shared/protocol.js';
 import { createRenderer } from './render.js';
 import { createUI } from './ui.js';
 import { createLocalInput, createPlayerInput, initTouchControls, setTouchControlsVisible } from './input.js';
 import { createNet } from './net.js';
 import { createSound } from './sounds.js';
+import {
+  advanceFixedPrediction,
+  canPredictBomb,
+  decayVisualCorrection,
+  isSnapshotDiscontinuity,
+  needsPredictionRebase,
+  predictionFromSnapshot,
+  rebaseWithVisualCorrection,
+} from './sync.js';
 
 const canvas = document.getElementById('board');
 const renderer = createRenderer(canvas);
@@ -44,12 +53,17 @@ let localEventSnap = null;    // previous snapshot, for SFX/shake event detectio
 let net = null;
 let onlineInput = null;       // createPlayerInput()
 let mySlot = -1;              // our network slot (from JOINED)
+let onlineHostSlot = null;    // current host (updated on every LOBBY, including handoff)
+let onlinePlayerCount = 0;    // rematches still require a playable roster
 let curSnap = null;           // latest authoritative snapshot (events, prediction, dynamic render)
 let snapBuf = [];             // recent snapshots [{ snap, at }] for jitter-tolerant interpolation
 let lastSentInput = null;     // dedupe identical INPUT messages
 let onlineStarted = false;    // has START been received?
 let resultOpenOnline = false;
+let restartPending = false;   // host rematch request sent; wait for authoritative START
 let predicted = null;         // client-side predicted local player {x,y,dir,moving,speedPicks}
+let predictionAcc = 0;        // fixed-step prediction accumulator
+let predictionCorrection = { x: 0, y: 0 }; // render-only easing after reconciliation
 let predBombs = [];           // client-predicted own bombs awaiting server confirmation
 let predBombHeld = false;     // bomb-button edge state for local bomb prediction
 
@@ -86,6 +100,7 @@ const ui = createUI({
 // ===========================================================================
 function startLocal(numPlayers, winsToWin) {
   teardownOnline();
+  teardownLocal();
 
   const defs = [];
   localSlots = [];
@@ -135,7 +150,7 @@ function stepLocal(frameDt) {
 
   // Show the result overlay once when a round/match resolves; keep rendering.
   if ((snap.phase === 'roundover' || snap.phase === 'matchover') && !lastResultShown) {
-    ui.showResult(snap);
+    ui.showResult(snap, { canRestart: snap.phase === 'matchover' });
     lastResultShown = true;
   }
   if (snap.phase === 'playing' && lastResultShown) {
@@ -156,17 +171,31 @@ function connectAndJoin(name, room, winsToWin) {
   net = createNet({
     onJoined: (msg) => {
       mySlot = msg.slot;
+      onlineHostSlot = msg.host ? msg.slot : null;
       onlineInput = createPlayerInput(mySlot);
       ui.enterRoom({ room: msg.room, slot: msg.slot, host: msg.host });
     },
-    onLobby: (msg) => ui.updateLobby(msg),
+    onLobby: (msg) => {
+      onlineHostSlot = msg.host;
+      onlinePlayerCount = msg.players.length;
+      ui.updateLobby(msg);
+      // Host ownership can change after a disconnect, including while the final
+      // result is open. Refresh just the action without replaying the overlay.
+      if (resultOpenOnline && curSnap?.phase === 'matchover') syncOnlineResultAction();
+    },
     onStart: () => {
       onlineStarted = true;
       resultOpenOnline = false;
+      restartPending = false;
       lastSentInput = null;
-      predicted = null;
+      // START is the authoritative match boundary. Never render or interpolate
+      // the old terminal snapshot while waiting for the fresh initial snapshot.
+      curSnap = null;
+      snapBuf = [];
+      clearPredictionState();
       lastHudAt = HUD_INTERVAL; // refresh the HUD on the very first frame
       if (onlineInput) onlineInput.attach();
+      ui.setRestartPending(false);
       ui.resetHud();
       ui.show('hud');
       sound.play('start');
@@ -175,13 +204,25 @@ function connectAndJoin(name, room, winsToWin) {
     onSnapshot: (snap) => {
       // Detect SFX/shake events against the previously-held server snapshot,
       // then buffer this one for interpolation and reconcile our prediction.
-      detectEvents(curSnap, snap);
+      const discontinuity = isSnapshotDiscontinuity(curSnap, snap);
+      detectEvents(discontinuity ? null : curSnap, snap);
+      if (discontinuity) {
+        // Respawns are teleports by design. Blending a dead position from the
+        // previous round into a spawn point makes remote players streak across
+        // the board and leaves local prediction/bombs attached to stale state.
+        snapBuf = [];
+        clearPredictionState();
+      }
       curSnap = snap;
       snapBuf.push({ snap, at: performance.now() });
       if (snapBuf.length > 40) snapBuf.shift(); // keep ~1.3 s of history, plenty
       reconcilePrediction(snap);
     },
     onError: (msg) => {
+      if (restartPending) {
+        restartPending = false;
+        ui.setRestartPending(false);
+      }
       ui.showError(msg);
       // If we never made it into a room, drop back to the menu cleanly.
       if (!onlineStarted && mySlot < 0) backToMenu();
@@ -228,10 +269,9 @@ function tickOnline(frameDt) {
   const inp = onlineInput ? onlineInput.current() : null;
   if (sp && sp.alive && inp && curSnap.phase === 'playing') {
     if (!predicted) {
-      predicted = {
-        x: sp.x, y: sp.y, dir: sp.dir, moving: sp.moving,
-        speedPicks: sp.speedPicks, ghost: sp.ghost, stepping: false, tx: 0, ty: 0,
-      };
+      predicted = predictionFromSnapshot(sp);
+      predictionAcc = 0;
+      predictionCorrection = { x: 0, y: 0 };
     }
     // Keep ability-derived inputs to the movement model synced from authority.
     predicted.speedPicks = sp.speedPicks;
@@ -241,32 +281,43 @@ function tickOnline(frameDt) {
     // back through a bomb the server already blocks and rubber-band. Each entry
     // expires once the real bomb arrives in curSnap.bombs (or after a timeout).
     const nowMs = performance.now();
+    predBombs = predBombs.filter((b) =>
+      b.until > nowMs && !curSnap.bombs.some((s) => s.col === b.col && s.row === b.row));
     if (inp.bomb && !predBombHeld && (sp.bombLock || 0) <= 0) {
       const bc = Math.round(predicted.x - 0.5), br = Math.round(predicted.y - 0.5);
       const dup = predBombs.some((b) => b.col === bc && b.row === br) ||
                   curSnap.bombs.some((b) => b.col === bc && b.row === br);
-      if (!dup) predBombs.push({ col: bc, row: br, until: nowMs + 1500 });
+      // Match the server's concurrent-bomb quota. Without owner metadata a
+      // rejected placement became a phantom collision tile for 1.5 seconds.
+      if (!dup && canPredictBomb(mySlot, sp.maxBombs, curSnap.bombs, predBombs)) {
+        predBombs.push({ col: bc, row: br, until: nowMs + 1500 });
+      }
     }
     predBombHeld = !!inp.bomb;
-    predBombs = predBombs.filter((b) =>
-      b.until > nowMs && !curSnap.bombs.some((s) => s.col === b.col && s.row === b.row));
     const bombs = predBombs.length ? curSnap.bombs.concat(predBombs) : curSnap.bombs;
-    const pdt = Math.min(frameDt, 0.05);
-    stepPlayerGrid(curSnap.grid, bombs, predicted, inp, pdt);
-    // Tick the predicted ghost timer down too (re-synced from authority above),
-    // so wallpass doesn't mispredict for a frame right as ghost expires.
-    if (predicted.ghost > 0) predicted.ghost = Math.max(0, predicted.ghost - pdt);
+    // Mirror the server's 60 Hz fixed steps. The old per-frame 50 ms cap threw
+    // away half the elapsed time at 10 FPS, guaranteeing a later rubber-band.
+    predictionAcc = advanceFixedPrediction(predictionAcc, frameDt, (pdt) => {
+      stepPlayerGrid(curSnap.grid, bombs, predicted, inp, pdt);
+      // Tick predicted wallpass too (re-synced from authority on snapshots).
+      if (predicted.ghost > 0) predicted.ghost = Math.max(0, predicted.ghost - pdt);
+    });
   } else {
-    predicted = null;
-    predBombHeld = false;
+    clearPredictionState();
   }
 
   // Build the render view: other players + sliding bombs interpolated from the
   // buffered snapshots (smooth despite jitter), our own player from prediction.
   const view = interpolatedView();
   if (predicted) {
+    predictionCorrection = decayVisualCorrection(predictionCorrection, frameDt);
     const me = view.players.find((p) => p.slot === mySlot);
-    if (me) { me.x = predicted.x; me.y = predicted.y; me.dir = predicted.dir; me.moving = predicted.moving; }
+    if (me) {
+      me.x = predicted.x + predictionCorrection.x;
+      me.y = predicted.y + predictionCorrection.y;
+      me.dir = predicted.dir;
+      me.moving = predicted.moving || predictionCorrection.x !== 0 || predictionCorrection.y !== 0;
+    }
   }
   const render = { ...curSnap, players: view.players, bombs: view.bombs };
 
@@ -275,7 +326,7 @@ function tickOnline(frameDt) {
 
   const phase = curSnap.phase;
   if ((phase === 'roundover' || phase === 'matchover') && !resultOpenOnline) {
-    ui.showResult(curSnap);
+    showOnlineResult(curSnap);
     resultOpenOnline = true;
   }
   if (phase === 'playing' && resultOpenOnline) {
@@ -284,24 +335,22 @@ function tickOnline(frameDt) {
   }
 }
 
-// Reconcile the prediction with authority. With tile-stepping a soft off-axis
-// pull would drag the player off the grid, so we only correct on a real
-// discrepancy (death, sudden-death wall, a mispredicted turn under lag): snap to
-// the server position and let the next step re-align to the nearest centre.
-// Small latency lead on the same path is left alone so movement stays crisp.
+// Reconcile only a real topology/settled-state discrepancy. A moving predicted
+// player normally leads the RTT-old snapshot, so raw distance alone is not an
+// error. Exact authority resets the simulation; a render-only offset hides the
+// correction briefly without pulling the collision state off-grid.
 function reconcilePrediction(snap) {
   if (!predicted) return;
   const sp = snap.players.find((p) => p.slot === mySlot);
   if (!sp) return;
-  if (!sp.alive) { predicted = null; return; }
+  if (!sp.alive) { clearPredictionState(); return; }
   predicted.speedPicks = sp.speedPicks;
   predicted.ghost = sp.ghost;
-  if (Math.hypot(sp.x - predicted.x, sp.y - predicted.y) > 0.9) {
-    // Snap to the nearest cell centre (not the raw, possibly mid-step server
-    // position) so the next step's round-to-centre can't jump us back off-grid.
-    predicted.x = Math.round(sp.x - 0.5) + 0.5;
-    predicted.y = Math.round(sp.y - 0.5) + 0.5;
-    predicted.stepping = false;
+  if (needsPredictionRebase(predicted, sp, snap.grid)) {
+    const rebased = rebaseWithVisualCorrection(predicted, sp, predictionCorrection);
+    predicted = rebased.predicted;
+    predictionCorrection = rebased.correction;
+    predictionAcc = 0;
   }
 }
 
@@ -415,16 +464,49 @@ function updateHudThrottled(snap, slots, frameDt) {
   ui.updateHud(snap, slots);
 }
 
+function showOnlineResult(snap) {
+  const isMatch = snap.phase === 'matchover';
+  const amHost = onlineHostSlot === mySlot;
+  const enoughPlayers = onlinePlayerCount >= MIN_PLAYERS;
+  const canRestart = isMatch && amHost && enoughPlayers;
+  ui.showResult(snap, {
+    canRestart,
+    waitingForHost: isMatch && !amHost,
+    waitingForPlayers: isMatch && amHost && !enoughPlayers,
+    restartPending,
+  });
+}
+
+function syncOnlineResultAction() {
+  const amHost = onlineHostSlot === mySlot;
+  const enoughPlayers = onlinePlayerCount >= MIN_PLAYERS;
+  const canRestart = amHost && enoughPlayers;
+  ui.setResultAction({
+    visible: true,
+    canRestart,
+    waitingForHost: !amHost,
+    waitingForPlayers: amHost && !enoughPlayers,
+    pending: restartPending,
+  });
+}
+
 function onRestart() {
-  if (mode === 'local' && localGame) {
+  if (mode === 'local' && localGame?.phase === 'matchover') {
     // Recreate a fresh match with the same player count / wins.
     const numPlayers = localGame.players.length;
     const winsToWin = localGame.winsToWin;
     startLocal(numPlayers, winsToWin);
-  } else if (mode === 'online' && net) {
+  } else if (mode === 'online' && net && curSnap?.phase === 'matchover' &&
+             onlineHostSlot === mySlot && onlinePlayerCount >= MIN_PLAYERS && !restartPending) {
+    // Keep the result visible and disabled until START confirms the new match.
+    // This makes double clicks and stale terminal snapshots harmless.
+    restartPending = true;
     net.restart();
-    resultOpenOnline = false;
-    ui.show('hud');
+    ui.setRestartPending(true);
+  } else {
+    // The UI disables itself synchronously before invoking this callback. Undo
+    // that optimistic state if the lifecycle/host guard rejected the action.
+    ui.setRestartPending(false);
   }
 }
 
@@ -458,12 +540,22 @@ function teardownOnline() {
 
 function resetOnlineState() {
   mySlot = -1;
+  onlineHostSlot = null;
+  onlinePlayerCount = 0;
   curSnap = null;
   snapBuf = [];
   onlineStarted = false;
   resultOpenOnline = false;
+  restartPending = false;
   lastSentInput = null;
+  clearPredictionState();
+  ui.setRestartPending(false);
+}
+
+function clearPredictionState() {
   predicted = null;
+  predictionAcc = 0;
+  predictionCorrection = { x: 0, y: 0 };
   predBombs = [];
   predBombHeld = false;
 }

@@ -33,6 +33,12 @@ function clampWins(n) {
 // Idle input applied to a player whose socket has gone away mid-match.
 const IDLE_INPUT = { up: false, down: false, left: false, right: false, bomb: false };
 
+// Clients send input only when it changes. Keep a short ordered queue so two
+// transitions received between simulation ticks (notably press -> release) are
+// both observed by the engine. The bound prevents a noisy client from building
+// an ever-growing input backlog; under overload, favour recent intent.
+const MAX_INPUT_QUEUE = 32;
+
 // Drive the sim interval a touch faster than a single tick so the accumulator
 // always has work to do; the fixed-step loop keeps the actual rate exact.
 const SIM_INTERVAL_MS = 1000 / TICK_HZ; // ~16.67ms
@@ -79,6 +85,8 @@ class Room {
     this.lastTickAt = 0;      // ms timestamp of the previous loop iteration
     this.accumulator = 0;     // leftover seconds awaiting a fixed step
     this.snapAccumulator = 0; // seconds since the last snapshot broadcast
+    this.lastSnapshotPhase = null;
+    this.lastSnapshotRound = null;
   }
 
   // First free slot, or -1 if the room is full.
@@ -108,6 +116,8 @@ class Room {
       slot,
       name: name || `P${slot + 1}`,
       ready: false,
+      input: IDLE_INPUT,
+      inputQueue: [],
     };
     this.members[slot] = member;
     if (this.hostSlot === null) this.hostSlot = slot;
@@ -151,10 +161,15 @@ class Room {
     };
   }
 
-  broadcast(raw) {
+  broadcast(raw, { dropIfBuffered = false } = {}) {
     for (const m of this.memberList) {
       // ws readyState 1 === OPEN
-      if (m.socket.readyState === 1) m.socket.send(raw);
+      if (m.socket.readyState !== 1) continue;
+      // Snapshots are complete world states, so an older queued snapshot has no
+      // value. Skip this one for a slow socket instead of extending its backlog;
+      // reliable lifecycle/lobby messages still use the non-droppable default.
+      if (dropIfBuffered && m.socket.bufferedAmount > 0) continue;
+      m.socket.send(raw);
     }
   }
 
@@ -173,9 +188,14 @@ class Room {
     }));
     this.game = createGame(playerDefs, { seed: makeSeed(), winsToWin: this.winsToWin });
 
-    // Reset every member's held input to idle so a lingering lobby key doesn't
-    // leak into the first tick.
-    for (const m of this.memberList) setInput(this.game, m.slot, IDLE_INPUT);
+    // Reset both the engine and the member-side held/queued input. Resetting only
+    // the engine would let tick() immediately reapply a stale key from the
+    // previous match.
+    for (const m of this.memberList) {
+      m.input = IDLE_INPUT;
+      m.inputQueue.length = 0;
+      setInput(this.game, m.slot, IDLE_INPUT);
+    }
 
     this.broadcast(encode(MSG.START, { winsToWin: this.winsToWin }));
     this.startLoop();
@@ -183,10 +203,11 @@ class Room {
 
   // Restart only makes sense once a match has fully resolved.
   restartMatch() {
-    if (!this.game || this.game.phase !== 'matchover') return;
+    if (!this.game || this.game.phase !== 'matchover' || this.count < MIN_PLAYERS) return false;
     this.stopLoop();
     // Wipe ready flags and scores by rebuilding the game from scratch.
     this.startMatch();
+    return true;
   }
 
   startLoop() {
@@ -194,6 +215,8 @@ class Room {
     this.lastTickAt = Date.now();
     this.accumulator = 0;
     this.snapAccumulator = 0;
+    this.lastSnapshotPhase = null;
+    this.lastSnapshotRound = null;
     this.timer = setInterval(() => this.tick(), SIM_INTERVAL_MS);
     // Push one snapshot immediately so clients render the initial world.
     this.broadcastSnapshot();
@@ -221,9 +244,12 @@ class Room {
     this.accumulator += elapsed;
 
     while (this.accumulator >= TICK_DT) {
-      // Apply each member's latest input just before their step.
+      // Consume at most one transition per simulation step, then keep holding it
+      // until another transition arrives. This preserves short taps whose press
+      // and release reached the socket within the same timer interval.
       for (const m of this.memberList) {
-        if (m.input) setInput(this.game, m.slot, m.input);
+        if (m.inputQueue.length > 0) m.input = m.inputQueue.shift();
+        setInput(this.game, m.slot, m.input);
       }
       step(this.game, TICK_DT);
       this.accumulator -= TICK_DT;
@@ -232,14 +258,28 @@ class Room {
     // Throttle snapshots to SNAPSHOT_HZ, independent of the sim rate.
     this.snapAccumulator += elapsed;
     if (this.snapAccumulator >= SNAPSHOT_INTERVAL) {
-      this.snapAccumulator = 0;
+      // Preserve fractional overshoot so timer jitter cannot slowly drag the
+      // effective broadcast rate below SNAPSHOT_HZ. Discard whole missed
+      // intervals after a stall; snapshots are full states, so bursts add no
+      // value.
+      this.snapAccumulator %= SNAPSHOT_INTERVAL;
       this.broadcastSnapshot();
     }
   }
 
   broadcastSnapshot() {
     if (!this.game) return;
-    this.broadcast(encode(MSG.SNAPSHOT, { snap: toSnapshot(this.game) }));
+    const snap = toSnapshot(this.game);
+    const lifecycleChanged = snap.phase !== this.lastSnapshotPhase ||
+      snap.round !== this.lastSnapshotRound;
+    this.broadcast(
+      encode(MSG.SNAPSHOT, { snap }),
+      // Round/match results and fresh-round spawns exist only in snapshots. They
+      // are reliable boundaries; only redundant steady-state updates may drop.
+      { dropIfBuffered: !lifecycleChanged },
+    );
+    this.lastSnapshotPhase = snap.phase;
+    this.lastSnapshotRound = snap.round;
   }
 
   // Tear everything down (room is being deleted).
@@ -348,15 +388,25 @@ function onInput(socket, msg) {
   const inp = msg.input;
   if (!inp || typeof inp !== 'object') return;
   // Coerce to clean booleans so a malformed payload can't poison the engine.
-  member.input = {
+  const clean = {
     up: !!inp.up,
     down: !!inp.down,
     left: !!inp.left,
     right: !!inp.right,
     bomb: !!inp.bomb,
   };
-  // Live-apply immediately too; the loop will also pick it up next tick.
-  if (room.game) setInput(room.game, member.slot, member.input);
+
+  // Ignore duplicate states (the browser already dedupes, but the server must
+  // not trust clients to do so). Otherwise queue the transition in wire order.
+  const previous = member.inputQueue[member.inputQueue.length - 1] || member.input;
+  if (sameInput(previous, clean)) return;
+  member.inputQueue.push(clean);
+  if (member.inputQueue.length > MAX_INPUT_QUEUE) member.inputQueue.shift();
+}
+
+function sameInput(a, b) {
+  return a.up === b.up && a.down === b.down && a.left === b.left &&
+         a.right === b.right && a.bomb === b.bomb;
 }
 
 function onReady(socket, msg) {
@@ -379,6 +429,10 @@ function onRestart(socket) {
   if (!room) return;
   // Only the host may restart, and only after the match is over.
   if (room.hostSlot !== socket._slot) return;
+  if (room.game?.phase === 'matchover' && room.count < MIN_PLAYERS) {
+    sendError(socket, 'At least two players are required for a rematch.');
+    return;
+  }
   room.restartMatch();
 }
 

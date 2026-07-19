@@ -12,8 +12,9 @@
     "server": "node server/index.js",
     "start": "npm run build && node server/index.js",
     "preview": "vite preview",
-    "test": "node server/test-engine.mjs && node server/test-online.mjs",
+    "test": "node server/test-engine.mjs && node server/test-sync.mjs && node server/test-online.mjs",
     "test:engine": "node server/test-engine.mjs",
+    "test:sync": "node server/test-sync.mjs",
     "test:online": "node server/test-online.mjs"
   },
   "dependencies": {

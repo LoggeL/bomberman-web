@@ -1,7 +1,10 @@
 // Headless sanity check for the shared engine — no browser, no server.
 // Run: node server/test-engine.mjs
 import { createGame, step, setInput, toSnapshot } from '../shared/engine.js';
-import { TICK_DT, CELL, COLS, ROWS, BOMB_FUSE, POWERUP, SHIELD_INVULN, GHOST_TIME } from '../shared/constants.js';
+import {
+  TICK_DT, CELL, COLS, ROWS, BOMB_FUSE, POWERUP, SHIELD_INVULN, GHOST_TIME,
+  ROUND_END_DELAY, SUDDEN_DEATH_TIME,
+} from '../shared/constants.js';
 
 let failed = 0;
 const ok = (cond, msg) => { if (!cond) { failed++; console.error('  ✗', msg); } else console.log('  ✓', msg); };
@@ -61,6 +64,22 @@ ok(Array.isArray(round.players) && round.players[0].name === 'Rot', 'snapshot pl
 ok('shield' in round.players[0] && 'ghost' in round.players[0] && 'pierce' in round.players[0],
   'snapshot carries ability fields');
 
+console.log('snapshot carries prediction and bomb ownership state');
+{
+  const gg = createGame(defs, { seed: 29, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.bombLock = 0;
+  setInput(gg, 0, { right: true, bomb: true });
+  step(gg, TICK_DT);
+
+  const wire = JSON.parse(JSON.stringify(toSnapshot(gg)));
+  const player = wire.players.find((p) => p.slot === 0);
+  const bomb = wire.bombs[0];
+  ok(player && player.stepping === pp.stepping && player.tx === pp.tx && player.ty === pp.ty,
+    'snapshot carries stepping target for client prediction');
+  ok(bomb && bomb.owner === 0, 'snapshot carries bomb owner');
+}
+
 console.log('round reset clears powerups but keeps score');
 {
   const gg = createGame(defs, { seed: 31, winsToWin: 3 });
@@ -73,6 +92,45 @@ console.log('round reset clears powerups but keeps score');
   ok(p0.score === 1, 'score persists across rounds');
   ok(p0.maxBombs === 1 && p0.range === 2 && p0.speedPicks === 0 && !p0.pierce && !p0.kick && p0.shield === 0 && p0.ghost === 0,
     'all powerups reset at new round spawn');
+}
+
+console.log('sudden-death clock resets between rounds');
+{
+  const gg = createGame(defs, { seed: 37, winsToWin: 3 });
+  const p0 = gg.players[0], p1 = gg.players[1];
+  // Resolve a round after sudden death has already begun, keeping the survivor
+  // away from the first collapsing cell at the top-left spawn.
+  gg.time = SUDDEN_DEATH_TIME + 5;
+  p0.x = 3.5; p0.y = 3.5;
+  p1.alive = false;
+  step(gg, TICK_DT);
+  ok(gg.phase === 'roundover', 'long round resolves normally');
+
+  const maxDelayTicks = Math.ceil(ROUND_END_DELAY / TICK_DT) + 2;
+  for (let i = 0; i < maxDelayTicks && gg.phase === 'roundover'; i++) step(gg, TICK_DT);
+  ok(gg.phase === 'playing' && gg.round === 2, 'next round starts after the result delay');
+  ok(gg.time === 0, 'new round starts with a fresh sudden-death clock');
+  ok(gg.spiral === null && gg.spiralIdx === 0, 'new round starts without a collapse in progress');
+
+  const scoreBefore = p0.score;
+  step(gg, TICK_DT);
+  ok(gg.phase === 'playing' && gg.players.every((p) => p.alive),
+    'first tick of the new round does not kill a player at spawn');
+  ok(p0.score === scoreBefore && gg.grid[1 * COLS + 1] === CELL.EMPTY,
+    'new round neither awards a free win nor closes the top-left spawn');
+}
+
+console.log('sudden death still activates at the normal threshold');
+{
+  const gg = createGame(defs, { seed: 41, winsToWin: 2 });
+  // Keep both players clear of the first spiral cell so activation itself does
+  // not end the round and obscure the threshold assertion.
+  gg.players[0].x = 3.5; gg.players[0].y = 3.5;
+  gg.time = SUDDEN_DEATH_TIME - TICK_DT / 2;
+  step(gg, TICK_DT);
+  ok(Array.isArray(gg.spiral) && gg.spiralIdx === 1,
+    'crossing the threshold starts the sudden-death spiral');
+  ok(gg.grid[1 * COLS + 1] === CELL.SOLID, 'first sudden-death wall is placed');
 }
 
 console.log('spawn bomb lock prevents fat-finger self-bomb');
