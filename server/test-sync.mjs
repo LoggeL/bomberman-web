@@ -165,6 +165,8 @@ console.log('pickup effects identify the player and describe the ability');
     'the popup explains the timed ghost effect with its matching color');
   ok(getPickupEffect(6).text === 'Schild · 10s',
     'the shield popup explains its temporary protection window');
+  ok(getPickupEffect(5).text === 'Durchschlag +1',
+    'the pierce popup explains that another stack was added');
   ok(getPickupEffect(999).text === 'Power-up',
     'unknown future pickup kinds retain a safe fallback label');
 }

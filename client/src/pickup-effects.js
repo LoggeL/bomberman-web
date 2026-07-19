@@ -8,7 +8,7 @@ const EFFECTS = Object.freeze({
   [POWERUP.RANGE]: Object.freeze({ text: 'Reichweite ↑', color: '#ffcf3f' }),
   [POWERUP.SPEED]: Object.freeze({ text: 'Tempo ↑', color: '#5dd95d' }),
   [POWERUP.GHOST]: Object.freeze({ text: `Wandlauf · ${GHOST_TIME}s`, color: '#b98cff' }),
-  [POWERUP.PIERCE]: Object.freeze({ text: 'Durchschlag aktiv', color: '#ff8a3f' }),
+  [POWERUP.PIERCE]: Object.freeze({ text: 'Durchschlag +1', color: '#ff8a3f' }),
   [POWERUP.SHIELD]: Object.freeze({ text: `Schild · ${SHIELD_TIME}s`, color: '#3fe0ff' }),
   [POWERUP.KICK]: Object.freeze({ text: 'Bomben-Kick aktiv', color: '#ff7ed4' }),
 });

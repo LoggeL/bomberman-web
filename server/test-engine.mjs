@@ -253,7 +253,7 @@ console.log('round reset clears powerups but keeps score');
 {
   const gg = createGame(defs, { seed: 31, winsToWin: 3 });
   const p0 = gg.players[0], p1 = gg.players[1];
-  p0.maxBombs = 4; p0.range = 5; p0.speedPicks = 2; p0.pierce = true; p0.kick = true;
+  p0.maxBombs = 4; p0.range = 5; p0.speedPicks = 2; p0.pierce = 3; p0.kick = true;
   p0.shield = 1; p0.shieldTime = 6; p0.ghost = 3;
   p1.alive = false;
   step(gg, TICK_DT); // resolves round, awards p0 one score
@@ -261,7 +261,7 @@ console.log('round reset clears powerups but keeps score');
   ok(gg.phase === 'playing' && gg.round === 2, 'new round started after roundover delay');
   ok(p0.score === 1, 'score persists across rounds');
   ok(p0.maxBombs === 1 && p0.range === 2 && p0.speedPicks === 0 &&
-     !p0.pierce && !p0.kick && p0.shield === 0 && p0.shieldTime === 0 && p0.ghost === 0,
+     p0.pierce === 0 && !p0.kick && p0.shield === 0 && p0.shieldTime === 0 && p0.ghost === 0,
     'all powerups reset at new round spawn');
 }
 
@@ -409,23 +409,48 @@ console.log('kicked bomb cannot tunnel a wall that closes mid-slide');
   ok(survivor && survivor.col <= 3, 'bomb stopped before the closed wall (no tunnel)');
 }
 
-console.log('PIERCE tears through multiple bricks');
+console.log('PIERCE pickups stack');
 {
   const gg = createGame(defs, { seed: 11, winsToWin: 2 });
   const pp = gg.players[0];
-  pp.pierce = true; pp.range = 5;
-  pp.bombLock = 0;
-  gg.hidden.clear();
-  gg.grid[1 * COLS + 2] = CELL.BRICK;
-  gg.grid[1 * COLS + 3] = CELL.BRICK;
-  gg.grid[1 * COLS + 4] = CELL.EMPTY;
-  gg.grid[3 * COLS + 1] = CELL.EMPTY; // escape route for the bomber
-  pp.x = 1.5; pp.y = 1.5;
-  setInput(gg, 0, { bomb: true }); step(gg, TICK_DT); setInput(gg, 0, { bomb: false });
-  pp.x = 1.5; pp.y = 3.5; // step the bomber out of its own blast
-  for (let i = 0; i < Math.ceil((BOMB_FUSE + 0.1) / TICK_DT); i++) step(gg, TICK_DT);
-  ok(gg.grid[1 * COLS + 2] === CELL.EMPTY && gg.grid[1 * COLS + 3] === CELL.EMPTY,
-    'pierce destroyed both bricks in the line');
+  const pickupCell = Math.floor(pp.y) * COLS + Math.floor(pp.x);
+  gg.powerups.set(pickupCell, POWERUP.PIERCE);
+  step(gg, TICK_DT);
+  gg.powerups.set(pickupCell, POWERUP.PIERCE);
+  step(gg, TICK_DT);
+  ok(pp.pierce === 2, 'collecting two pierce pickups grants two stacks');
+}
+
+console.log('PIERCE stacks cross one additional brick each');
+{
+  const runPierceBlast = (stacks) => {
+    const gg = createGame(defs, { seed: 11, winsToWin: 2 });
+    const pp = gg.players[0];
+    pp.pierce = stacks; pp.range = 5;
+    pp.bombLock = 0;
+    gg.hidden.clear();
+    gg.grid[1 * COLS + 2] = CELL.BRICK;
+    gg.grid[1 * COLS + 3] = CELL.BRICK;
+    gg.grid[1 * COLS + 4] = CELL.BRICK;
+    gg.grid[3 * COLS + 1] = CELL.EMPTY; // escape route for the bomber
+    pp.x = 1.5; pp.y = 1.5;
+    setInput(gg, 0, { bomb: true }); step(gg, TICK_DT); setInput(gg, 0, { bomb: false });
+    pp.x = 1.5; pp.y = 3.5; // step the bomber out of its own blast
+    for (let i = 0; i < Math.ceil((BOMB_FUSE + 0.1) / TICK_DT); i++) step(gg, TICK_DT);
+    return gg;
+  };
+
+  const oneStack = runPierceBlast(1);
+  ok(oneStack.grid[1 * COLS + 2] === CELL.EMPTY &&
+     oneStack.grid[1 * COLS + 3] === CELL.EMPTY &&
+     oneStack.grid[1 * COLS + 4] === CELL.BRICK,
+    'one stack crosses one brick and stops on the next');
+
+  const twoStacks = runPierceBlast(2);
+  ok(twoStacks.grid[1 * COLS + 2] === CELL.EMPTY &&
+     twoStacks.grid[1 * COLS + 3] === CELL.EMPTY &&
+     twoStacks.grid[1 * COLS + 4] === CELL.EMPTY,
+    'two stacks cross two bricks and reach the third');
 }
 
 console.log('SHIELD is temporary and absorbs one lethal hit');

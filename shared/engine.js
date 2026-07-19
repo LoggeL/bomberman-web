@@ -13,7 +13,7 @@ import {
   COLS, ROWS, CELL, POWERUP, TICK_DT,
   BOMB_FUSE, FLAME_TIME,
   BASE_SPEED, SPEED_PER_PICKUP, MAX_SPEED_PICKUPS,
-  START_BOMBS, START_RANGE, MAX_BOMBS, MAX_RANGE,
+  START_BOMBS, START_RANGE, MAX_BOMBS, MAX_RANGE, MAX_PIERCE,
   SHIELD_INVULN, SHIELD_TIME, GHOST_TIME, KICK_SPEED,
   SPAWNS, ROUND_END_DELAY, SUDDEN_DEATH_TIME, SPAWN_BOMB_LOCK,
 } from './constants.js';
@@ -62,7 +62,7 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
       range: START_RANGE,
       speedPicks: 0,
       ghost: 0,        // seconds of wallpass remaining (0 = off)
-      pierce: false,   // bombs tear through bricks
+      pierce: 0,       // extra destructible walls crossed per blast direction
       shield: 0,       // one-hit blocker while shieldTime remains
       shieldTime: 0,   // seconds before an unused shield expires
       kick: false,     // can kick bombs
@@ -120,7 +120,7 @@ function generateRound(state) {
     p.range = START_RANGE;
     p.speedPicks = 0;
     p.ghost = 0;
-    p.pierce = false;
+    p.pierce = 0;
     p.shield = 0;
     p.shieldTime = 0;
     p.kick = false;
@@ -303,6 +303,9 @@ function detonate(state, bomb, toExplode) {
     [1, 0, 'h'], [-1, 0, 'h'], [0, 1, 'v'], [0, -1, 'v'],
   ];
   for (const [dc, dr, orient] of dirs) {
+    // Every stack lets this arm cross one additional destructible wall.
+    // Number(true) keeps bombs from older boolean snapshots compatible.
+    let pierceLeft = Math.max(0, Number(bomb.pierce) || 0);
     for (let i = 1; i <= bomb.range; i++) {
       const col = bomb.col + dc * i;
       const row = bomb.row + dr * i;
@@ -316,12 +319,11 @@ function detonate(state, bomb, toExplode) {
           state.powerups.set(k, state.hidden.get(k));
           state.hidden.delete(k);
         }
-        // A normal blast stops at the first brick; a PIERCE blast tears straight
-        // through and keeps going to the edge of its range.
-        if (!bomb.pierce) {
+        if (pierceLeft <= 0) {
           addFlame(state, col, row, 'tip', orient);
           break;
         }
+        pierceLeft -= 1;
         addFlame(state, col, row, i === bomb.range ? 'tip' : 'arm', orient);
         continue;
       }
@@ -463,7 +465,9 @@ function applyPowerup(p, kind) {
   else if (kind === POWERUP.RANGE) p.range = Math.min(MAX_RANGE, p.range + 1);
   else if (kind === POWERUP.SPEED) p.speedPicks = Math.min(MAX_SPEED_PICKUPS, p.speedPicks + 1);
   else if (kind === POWERUP.GHOST) p.ghost = GHOST_TIME; // (re)arm the timer
-  else if (kind === POWERUP.PIERCE) p.pierce = true;
+  else if (kind === POWERUP.PIERCE) {
+    p.pierce = Math.min(MAX_PIERCE, Math.max(0, Number(p.pierce) || 0) + 1);
+  }
   else if (kind === POWERUP.SHIELD) {
     p.shield = 1;
     p.shieldTime = SHIELD_TIME; // re-arm and refresh the timer

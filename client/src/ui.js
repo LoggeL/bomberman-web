@@ -323,7 +323,8 @@ export function createUI(callbacks = {}) {
       const sp = String(p.speedPicks); if (c.speedEl.textContent !== sp) c.speedEl.textContent = sp;
       const sh = p.shield > 0 ? `${Math.ceil(p.shieldTime ?? SHIELD_TIME)}s` : '0';
       if (c.shieldEl.textContent !== sh) c.shieldEl.textContent = sh;
-      const badges = (p.ghost > 0 ? '👻' : '') + (p.pierce ? '💥' : '') + (p.kick ? '🦵' : '');
+      const pierce = Math.max(0, Number(p.pierce) || 0);
+      const badges = (p.ghost > 0 ? '👻' : '') + (pierce > 0 ? `💥×${pierce}` : '') + (p.kick ? '🦵' : '');
       if (c.badgesEl.textContent !== badges) c.badgesEl.textContent = badges;
       if (c.dead !== !p.alive) { c.dead = !p.alive; c.card.classList.toggle('dead', !p.alive); }
     }

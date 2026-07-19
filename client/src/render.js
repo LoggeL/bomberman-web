@@ -391,10 +391,40 @@ export function createRenderer(canvas) {
     c.stroke();
   }
 
+  function drawBreakableCue(c, x, y, t) {
+    c.save();
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+
+    // A segmented warm inner rim reads as "destructible" independently of the
+    // arena palette, while solid walls keep their uninterrupted heavy outline.
+    c.strokeStyle = 'rgba(255, 205, 105, 0.42)';
+    c.lineWidth = Math.max(1, t * 0.032);
+    c.setLineDash([t * 0.13, t * 0.16]);
+    roundRect(c, x + t * 0.1, y + t * 0.1, t * 0.8, t * 0.8, t * 0.08);
+    c.stroke();
+    c.setLineDash([]);
+
+    // Dual-tone crack stays visible over both bright frost and dark foundry
+    // textures without turning the block into a UI icon.
+    c.beginPath();
+    c.moveTo(x + t * 0.53, y + t * 0.26);
+    c.lineTo(x + t * 0.45, y + t * 0.42);
+    c.lineTo(x + t * 0.56, y + t * 0.54);
+    c.lineTo(x + t * 0.47, y + t * 0.74);
+    c.strokeStyle = 'rgba(255, 215, 135, 0.34)';
+    c.lineWidth = Math.max(1.4, t * 0.055);
+    c.stroke();
+    c.strokeStyle = 'rgba(20, 12, 18, 0.78)';
+    c.lineWidth = Math.max(1, t * 0.026);
+    c.stroke();
+    c.restore();
+  }
+
   function drawBrick(c, col, row, palette, visualId) {
     const x = px(col), y = py(row);
     const t = tile;
-    if (drawAtlasCell(
+    const usedAtlas = drawAtlasCell(
       c,
       arenaTileAtlases[visualId],
       2,
@@ -405,31 +435,35 @@ export function createRenderer(canvas) {
       y,
       t,
       t,
-    )) return;
+    );
 
-    c.fillStyle = palette.brickBase;
-    roundRect(c, x + 1, y + 1, t - 2, t - 2, 4);
-    c.fill();
-    // brick courses
-    c.strokeStyle = palette.brickMortar;
-    c.lineWidth = Math.max(1, t * 0.045);
-    const rows = 3;
-    const rh = (t - 2) / rows;
-    c.beginPath();
-    for (let i = 1; i < rows; i++) {
-      c.moveTo(x + 2, y + 1 + i * rh);
-      c.lineTo(x + t - 2, y + 1 + i * rh);
+    if (!usedAtlas) {
+      c.fillStyle = palette.brickBase;
+      roundRect(c, x + 1, y + 1, t - 2, t - 2, 4);
+      c.fill();
+      // brick courses
+      c.strokeStyle = palette.brickMortar;
+      c.lineWidth = Math.max(1, t * 0.045);
+      const rows = 3;
+      const rh = (t - 2) / rows;
+      c.beginPath();
+      for (let i = 1; i < rows; i++) {
+        c.moveTo(x + 2, y + 1 + i * rh);
+        c.lineTo(x + t - 2, y + 1 + i * rh);
+      }
+      // offset vertical joints
+      for (let i = 0; i < rows; i++) {
+        const offset = i % 2 === 0 ? t * 0.5 : t * 0.25;
+        c.moveTo(x + offset, y + 1 + i * rh);
+        c.lineTo(x + offset, y + 1 + (i + 1) * rh);
+      }
+      c.stroke();
+      // top highlight
+      c.fillStyle = palette.brickHighlight;
+      c.fillRect(x + 2, y + 2, t - 4, Math.max(1, t * 0.08));
     }
-    // offset vertical joints
-    for (let i = 0; i < rows; i++) {
-      const offset = i % 2 === 0 ? t * 0.5 : t * 0.25;
-      c.moveTo(x + offset, y + 1 + i * rh);
-      c.lineTo(x + offset, y + 1 + (i + 1) * rh);
-    }
-    c.stroke();
-    // top highlight
-    c.fillStyle = palette.brickHighlight;
-    c.fillRect(x + 2, y + 2, t - 4, Math.max(1, t * 0.08));
+
+    drawBreakableCue(c, x, y, t);
   }
 
   // ---- powerups (dynamic) ---------------------------------------------------
@@ -588,19 +622,23 @@ export function createRenderer(canvas) {
   // ---- bombs (dynamic) ------------------------------------------------------
 
   // The cells a bomb's blast will cover, mirroring the engine's detonate(): the
-  // centre plus each arm out to `range`, stopping at SOLID, and at the first
-  // BRICK unless the bomb pierces. Used only for the on-floor preview.
+  // centre plus each arm out to `range`, stopping at SOLID. Each pierce stack
+  // lets an arm cross one additional BRICK. Used only for the on-floor preview.
   function blastCells(b, grid) {
     const cells = [[b.col, b.row]];
     const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     for (const [dc, dr] of dirs) {
+      let pierceLeft = Math.max(0, Number(b.pierce) || 0);
       for (let i = 1; i <= b.range; i++) {
         const col = b.col + dc * i, row = b.row + dr * i;
         if (col < 0 || col >= COLS || row < 0 || row >= ROWS) break;
         const c = grid[row * COLS + col];
         if (c === CELL.SOLID) break;
         cells.push([col, row]);
-        if (c === CELL.BRICK) { if (!b.pierce) break; } // brick stops a normal blast
+        if (c === CELL.BRICK) {
+          if (pierceLeft <= 0) break;
+          pierceLeft -= 1;
+        }
       }
     }
     return cells;
