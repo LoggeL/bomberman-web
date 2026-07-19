@@ -1,6 +1,6 @@
 // Canvas renderer for the Bomberman board.
 //
-// createRenderer(canvas) -> { resize(), draw(snap, { localSlots }), shake(magnitude) }
+// createRenderer(canvas) -> { resize(), draw(snap, { localSlots, pickupPopups }), shake(magnitude) }
 //
 // The board is COLS x ROWS logical tiles. We compute an integer-ish tile size
 // that fits the viewport, centre the board, and draw everything in device
@@ -15,17 +15,19 @@
 //
 // So we cache two offscreen layers and blit them with a single drawImage each:
 //   - FLOOR layer:   checkerboard + faint grid lines + board backdrop/frame
-//                    glow. Rebuilt only on resize().
+//                    glow. Rebuilt on resize() or when the arena theme changes.
 //   - TERRAIN layer: solid pillars + bricks. Rebuilt only when snap.grid
-//                    actually changes (cheap signature compare) or on resize().
+//                    actually changes (cheap signature compare), the arena
+//                    theme changes, or on resize().
 //
 // Everything genuinely dynamic (powerups, bombs, flames, players) is still
 // drawn per frame, but we keep shadowBlur usage to a small handful of entities
 // and prefer pre-baked radial gradients for glow where it reads the same.
 
 import {
-  COLS, ROWS, CELL, POWERUP, BOMB_FUSE, PLAYER_COLORS, GHOST_TIME,
+  COLS, ROWS, CELL, POWERUP, BOMB_FUSE, PLAYER_COLORS, GHOST_TIME, SHIELD_TIME,
 } from '../../shared/constants.js';
+import { getArenaVisual } from './arena-visuals.js';
 
 export function createRenderer(canvas) {
   const ctx = canvas.getContext('2d');
@@ -45,6 +47,10 @@ export function createRenderer(canvas) {
   const floorCtx = floorCanvas.getContext('2d');
   const terrainCanvas = document.createElement('canvas');
   const terrainCtx = terrainCanvas.getContext('2d');
+
+  // Begin with the safe fallback so resize() can build a complete floor before
+  // the first snapshot arrives. draw() replaces it when an arena is announced.
+  let activeArenaVisual = getArenaVisual(null);
 
   // The terrain layer is keyed by a signature of the grid contents; when the
   // signature is unchanged we skip the (relatively pricey) terrain rebuild.
@@ -100,8 +106,8 @@ export function createRenderer(canvas) {
     floorCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     terrainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // The floor is fully determined by layout, so rebuild it now...
-    renderFloorLayer();
+    // The floor is fully determined by layout and the active arena palette.
+    renderFloorLayer(activeArenaVisual.palette);
     // ...and force the terrain layer to rebuild on the next draw().
     terrainSig = null;
   }
@@ -132,12 +138,12 @@ export function createRenderer(canvas) {
     return "'Segoe UI', system-ui, sans-serif";
   }
 
-  // ---- static FLOOR layer (rebuilt only on resize) --------------------------
+  // ---- static FLOOR layer (rebuilt on resize/theme change) ------------------
 
   // Renders the board backdrop/frame glow, the checkerboard, and the faint grid
   // lines into the floor offscreen canvas. The frame glow uses shadowBlur, but
   // because it's baked here it costs nothing per frame.
-  function renderFloorLayer() {
+  function renderFloorLayer(palette) {
     const c = floorCtx;
     c.clearRect(0, 0, viewW, viewH);
 
@@ -145,9 +151,9 @@ export function createRenderer(canvas) {
 
     // Board backdrop with a soft neon frame glow.
     c.save();
-    c.shadowColor = 'rgba(63, 182, 255, 0.25)';
+    c.shadowColor = palette.frameGlow;
     c.shadowBlur = 30;
-    c.fillStyle = '#0a0e1a';
+    c.fillStyle = palette.backdrop;
     roundRect(c, originX - 6, originY - 6, boardW + 12, boardH + 12, 14);
     c.fill();
     c.restore();
@@ -160,13 +166,13 @@ export function createRenderer(canvas) {
     // Subtle checkerboard so motion is readable.
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
-        c.fillStyle = (col + row) % 2 === 0 ? '#10162a' : '#0d1322';
+        c.fillStyle = (col + row) % 2 === 0 ? palette.floorA : palette.floorB;
         c.fillRect(px(col), py(row), tile, tile);
       }
     }
 
     // Faint grid lines for that arcade-floor feel.
-    c.strokeStyle = 'rgba(120, 150, 220, 0.05)';
+    c.strokeStyle = palette.grid;
     c.lineWidth = 1;
     c.beginPath();
     for (let col = 0; col <= COLS; col++) {
@@ -187,10 +193,10 @@ export function createRenderer(canvas) {
   // Cheap signature of the grid: only solids/bricks matter for terrain, and the
   // grid is a flat int array, so a join is plenty fast for a 15x13 board and is
   // far cheaper than rebuilding the bevelled tiles every frame.
-  function gridSignature(grid) {
-    // Include tile size so a resize (handled separately) or any layout drift
-    // also invalidates the cache.
-    let sig = tile + ':';
+  function gridSignature(grid, visualId) {
+    // Include tile size and the resolved visual so either layout or arena
+    // changes invalidate the otherwise-identical terrain cache.
+    let sig = visualId + ':' + tile + ':';
     for (let i = 0; i < grid.length; i++) {
       const v = grid[i];
       // Only SOLID/BRICK affect the rendered terrain; collapse everything else.
@@ -199,7 +205,7 @@ export function createRenderer(canvas) {
     return sig;
   }
 
-  function renderTerrainLayer(grid) {
+  function renderTerrainLayer(grid, palette) {
     const c = terrainCtx;
     c.clearRect(0, 0, viewW, viewH);
 
@@ -212,44 +218,44 @@ export function createRenderer(canvas) {
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
         const v = grid[row * COLS + col];
-        if (v === CELL.SOLID) drawSolid(c, col, row);
-        else if (v === CELL.BRICK) drawBrick(c, col, row);
+        if (v === CELL.SOLID) drawSolid(c, col, row, palette);
+        else if (v === CELL.BRICK) drawBrick(c, col, row, palette);
       }
     }
 
     c.restore();
   }
 
-  function drawSolid(c, col, row) {
+  function drawSolid(c, col, row, palette) {
     const x = px(col), y = py(row);
     const t = tile;
     // 3D-ish bevelled pillar.
-    c.fillStyle = '#243152';
+    c.fillStyle = palette.solidBase;
     roundRect(c, x + 1, y + 1, t - 2, t - 2, 5);
     c.fill();
     // top-left highlight
-    c.fillStyle = 'rgba(150, 180, 255, 0.18)';
+    c.fillStyle = palette.solidHighlight;
     roundRect(c, x + 2, y + 2, t - 4, (t - 4) * 0.45, 4);
     c.fill();
     // bottom shadow
-    c.fillStyle = 'rgba(0, 0, 0, 0.35)';
+    c.fillStyle = palette.solidShadow;
     roundRect(c, x + 2, y + t * 0.6, t - 4, t * 0.36, 4);
     c.fill();
     // crisp edge
-    c.strokeStyle = 'rgba(120, 150, 220, 0.35)';
+    c.strokeStyle = palette.solidEdge;
     c.lineWidth = 1;
     roundRect(c, x + 1.5, y + 1.5, t - 3, t - 3, 5);
     c.stroke();
   }
 
-  function drawBrick(c, col, row) {
+  function drawBrick(c, col, row, palette) {
     const x = px(col), y = py(row);
     const t = tile;
-    c.fillStyle = '#6b4630';
+    c.fillStyle = palette.brickBase;
     roundRect(c, x + 1, y + 1, t - 2, t - 2, 4);
     c.fill();
     // brick courses
-    c.strokeStyle = 'rgba(0, 0, 0, 0.28)';
+    c.strokeStyle = palette.brickMortar;
     c.lineWidth = Math.max(1, t * 0.045);
     const rows = 3;
     const rh = (t - 2) / rows;
@@ -266,7 +272,7 @@ export function createRenderer(canvas) {
     }
     c.stroke();
     // top highlight
-    c.fillStyle = 'rgba(255, 200, 150, 0.14)';
+    c.fillStyle = palette.brickHighlight;
     c.fillRect(x + 2, y + 2, t - 4, Math.max(1, t * 0.08));
   }
 
@@ -565,11 +571,11 @@ export function createRenderer(canvas) {
       ctx.shadowBlur = 0;
     }
 
-    // shield bubble — cyan ring, thicker with more charges, gently pulsing
+    // shield bubble — cyan ring that pulses while the timed blocker is active
     if (p.alive && p.shield > 0) {
       const pulse = 0.6 + 0.4 * Math.sin(now() * 6);
       ctx.strokeStyle = `rgba(63, 224, 255, ${0.45 + 0.35 * pulse})`;
-      ctx.lineWidth = Math.max(1.5, tile * 0.04 * Math.min(p.shield, 3));
+      ctx.lineWidth = Math.max(1.5, tile * 0.05);
       ctx.shadowColor = '#3fe0ff';
       ctx.shadowBlur = tile * 0.3;
       ctx.beginPath();
@@ -636,26 +642,76 @@ export function createRenderer(canvas) {
     ctx.fillText(label, x, ty);
     ctx.restore();
 
-    // timed-buff bar below the character (currently ghost / wallpass)
+    // Timed-buff bars below the character. If both are active, stack them.
+    const timedBuffs = [];
     if (p.alive && p.ghost > 0) {
-      const frac = Math.max(0, Math.min(1, p.ghost / GHOST_TIME));
+      timedBuffs.push({ fraction: p.ghost / GHOST_TIME, color: '#b98cff' });
+    }
+    if (p.alive && p.shield > 0 && p.shieldTime > 0) {
+      timedBuffs.push({ fraction: p.shieldTime / SHIELD_TIME, color: '#3fe0ff' });
+    }
+    for (let i = 0; i < timedBuffs.length; i++) {
+      const buff = timedBuffs[i];
+      const frac = Math.max(0, Math.min(1, buff.fraction));
       const bw = r * 1.7, bh = Math.max(2, tile * 0.08);
-      const bx = x - bw / 2, byb = y + r * 1.35;
+      const bx = x - bw / 2, byb = y + r * 1.35 + i * (bh + 2);
       ctx.save();
       ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
       roundRect(ctx, bx - 1, byb - 1, bw + 2, bh + 2, bh);
       ctx.fill();
-      ctx.fillStyle = '#b98cff';
+      ctx.fillStyle = buff.color;
       roundRect(ctx, bx, byb, bw * frac, bh, bh);
       ctx.fill();
       ctx.restore();
     }
   }
 
+  function drawPickupPopup(p, popup) {
+    if (!p.alive) return;
+    const progress = Math.max(0, Math.min(1, popup.progress || 0));
+    const fadeIn = Math.min(1, progress / 0.12);
+    const fadeOut = Math.min(1, (1 - progress) / 0.28);
+    const alpha = Math.max(0, Math.min(fadeIn, fadeOut));
+    if (alpha <= 0) return;
+
+    const x = px(0) + p.x * tile;
+    const y = py(0) + p.y * tile;
+    const rise = tile * (0.1 + progress * 0.38);
+    const textY = y - tile * 0.72 - rise;
+    const fontSize = Math.max(9, tile * 0.24);
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = `800 ${fontSize}px ${getFont()}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const width = ctx.measureText(popup.text).width + tile * 0.34;
+    const height = fontSize + tile * 0.18;
+    const edgePadding = tile * 0.06;
+    const labelX = Math.max(
+      originX + width / 2 + edgePadding,
+      Math.min(originX + tile * COLS - width / 2 - edgePadding, x),
+    );
+    const labelY = Math.max(originY + height / 2 + edgePadding, textY);
+    ctx.fillStyle = 'rgba(5, 8, 16, 0.82)';
+    roundRect(ctx, labelX - width / 2, labelY - height / 2, width, height, height / 2);
+    ctx.fill();
+    ctx.strokeStyle = popup.color;
+    ctx.lineWidth = Math.max(1, tile * 0.035);
+    roundRect(ctx, labelX - width / 2, labelY - height / 2, width, height, height / 2);
+    ctx.stroke();
+    ctx.fillStyle = popup.color;
+    ctx.shadowColor = popup.color;
+    ctx.shadowBlur = tile * 0.18;
+    ctx.fillText(popup.text, labelX, labelY + fontSize * 0.02);
+    ctx.restore();
+  }
+
   // ---- frame ----------------------------------------------------------------
 
   function draw(snap, opts = {}) {
     const localSlots = opts.localSlots || [];
+    const pickupPopups = opts.pickupPopups || [];
 
     // Compute the current shake offset before resetting the transform. We use a
     // deterministic counter-driven jitter (no Math.random) and decay the energy
@@ -678,15 +734,24 @@ export function createRenderer(canvas) {
 
     if (!snap) return;
 
+    // Arena metadata can change between rounds while the grid shape remains
+    // identical. Rebuild both static layers before blitting the new frame.
+    const nextArenaVisual = getArenaVisual(snap.arena);
+    if (nextArenaVisual.id !== activeArenaVisual.id) {
+      activeArenaVisual = nextArenaVisual;
+      renderFloorLayer(activeArenaVisual.palette);
+      terrainSig = null;
+    }
+
     // Static layers: one drawImage each. The offscreen canvases are full
     // viewport-sized and already in device pixels, so we blit them at 0,0 in the
     // (dpr-scaled) coordinate space.
     ctx.drawImage(floorCanvas, 0, 0, viewW, viewH);
 
-    // Rebuild terrain only when the grid contents (or tile size) changed.
-    const sig = gridSignature(snap.grid);
+    // Rebuild terrain only when the grid contents, tile size, or theme changed.
+    const sig = gridSignature(snap.grid, activeArenaVisual.id);
     if (sig !== terrainSig) {
-      renderTerrainLayer(snap.grid);
+      renderTerrainLayer(snap.grid, activeArenaVisual.palette);
       terrainSig = sig;
     }
     ctx.drawImage(terrainCanvas, 0, 0, viewW, viewH);
@@ -714,6 +779,10 @@ export function createRenderer(canvas) {
     const players = [...snap.players].sort((a, b) => (a.alive === b.alive ? 0 : a.alive ? 1 : -1));
     for (const p of players) {
       drawPlayer(p, localSlots.includes(p.slot));
+    }
+    for (const popup of pickupPopups) {
+      const p = players.find((player) => player.slot === popup.slot);
+      if (p) drawPickupPopup(p, popup);
     }
 
     ctx.restore();

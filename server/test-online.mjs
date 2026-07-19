@@ -48,6 +48,9 @@ const run = async () => {
   console.log(`online flow against ${URL}`);
   const host = client();
   await host.open;
+  host.send(MSG.PING, { id: 17 });
+  ok(await eventually(() => host.msgs.some((m) => m.type === MSG.PONG && m.id === 17)),
+    'server echoes ping probes before room join');
   host.send(MSG.JOIN, { name: 'Host', room: '', winsToWin: 2 });
   await wait(200);
   ok(host.joined && host.joined.host === true, 'host joined and is host');
@@ -70,6 +73,8 @@ const run = async () => {
   ok(host.started && guest.started, 'both clients received START');
   ok(host.started && host.started.winsToWin === 2, 'winsToWin from host honoured (=2)');
   ok(host.snaps > 0 && guest.snaps > 0, `snapshots flowing (host=${host.snaps}, guest=${guest.snaps})`);
+  ok(typeof host.lastSnap?.arena?.id === 'string' && typeof host.lastSnap?.arena?.theme === 'string',
+    'authoritative snapshots carry arena identity and theme');
 
   // Send some input and confirm the world keeps advancing.
   const before = host.snaps;

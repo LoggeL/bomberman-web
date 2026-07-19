@@ -2,9 +2,15 @@
 // to the callbacks main.js provides, and exposes a small API for main.js to
 // drive (show a screen, refresh the lobby/HUD, show results/errors).
 
-import { PLAYER_COLORS, PLAYER_NAMES, SUDDEN_DEATH_TIME } from '../../shared/constants.js';
+import {
+  PLAYER_COLORS, PLAYER_NAMES, SHIELD_TIME, SUDDEN_DEATH_TIME,
+} from '../../shared/constants.js';
+import { getArenaVisual } from './arena-visuals.js';
 
 const SCREENS = ['menu', 'local', 'online', 'hud', 'result'];
+const SETUP_SCREENS = new Set(['menu', 'local', 'online']);
+const AMBIENT_ARENAS = ['neon', 'foundry', 'frost'];
+const SPLASH_ROTATE_MS = 7500;
 
 export function createUI(callbacks = {}) {
   const cb = callbacks;
@@ -13,6 +19,71 @@ export function createUI(callbacks = {}) {
   // Cache screen sections.
   const screens = {};
   for (const name of SCREENS) screens[name] = $(`screen-${name}`);
+
+  // ---- arena splash backdrop -----------------------------------------------
+  const splashBackdrop = $('splash-backdrop');
+  const splashArts = [...splashBackdrop.querySelectorAll('.splash-art')];
+  const ambientVisuals = AMBIENT_ARENAS.map((arena) => getArenaVisual(arena));
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let ambientIndex = 0;
+  let splashTimer = null;
+
+  function splashKey(src) {
+    try {
+      const path = new URL(src, document.baseURI).pathname;
+      return path.slice(path.lastIndexOf('/') + 1);
+    } catch {
+      return String(src || '').split('/').pop();
+    }
+  }
+
+  function activateSplash(visual) {
+    const targetKey = splashKey(visual.splash.src);
+    let found = false;
+    for (const art of splashArts) {
+      const active = !found && splashKey(art.getAttribute('src')) === targetKey;
+      art.classList.toggle('is-active', active);
+      if (active) found = true;
+    }
+    // All authored visuals currently resolve to one of the three preloaded
+    // layers. Keep a defensive fallback so a future arena never yields a blank.
+    if (!found && splashArts[0]) splashArts[0].classList.add('is-active');
+
+    splashBackdrop.dataset.arena = visual.id;
+    splashBackdrop.style.setProperty('--splash-base', visual.palette.backdrop);
+    splashBackdrop.style.setProperty('--splash-glow', visual.palette.frameGlow);
+  }
+
+  function stopSplashRotation() {
+    if (splashTimer !== null) {
+      clearInterval(splashTimer);
+      splashTimer = null;
+    }
+  }
+
+  function showAmbientSplash() {
+    splashBackdrop.classList.remove('is-static');
+    splashBackdrop.classList.add('is-visible');
+    activateSplash(ambientVisuals[ambientIndex]);
+    if (reducedMotion || splashTimer !== null) return;
+    splashTimer = setInterval(() => {
+      ambientIndex = (ambientIndex + 1) % ambientVisuals.length;
+      activateSplash(ambientVisuals[ambientIndex]);
+    }, SPLASH_ROTATE_MS);
+  }
+
+  function showArenaSplash(arenaLike) {
+    stopSplashRotation();
+    const visual = getArenaVisual(arenaLike);
+    activateSplash(visual);
+    splashBackdrop.classList.add('is-visible', 'is-static');
+    return visual;
+  }
+
+  function hideSplash() {
+    stopSplashRotation();
+    splashBackdrop.classList.remove('is-visible', 'is-static');
+  }
 
   // ---- segmented-control helper -------------------------------------------
   // Returns a getter for the currently-selected numeric value.
@@ -48,6 +119,8 @@ export function createUI(callbacks = {}) {
     for (const name of SCREENS) {
       screens[name].classList.toggle('is-visible', name === screen);
     }
+    if (SETUP_SCREENS.has(screen)) showAmbientSplash();
+    else if (screen !== 'result') hideSplash();
   }
 
   // ---- menu ---------------------------------------------------------------
@@ -176,8 +249,11 @@ export function createUI(callbacks = {}) {
 
   // ---- HUD ----------------------------------------------------------------
   const hudPlayers = $('hud-players');
+  const hudArena = $('hud-arena');
   const hudRound = $('hud-round');
   const hudTimer = $('hud-timer');
+  const hudPing = $('hud-ping');
+  const hudPingValue = $('hud-ping-value');
   const suddenDeath = $('sudden-death');
 
   // The HUD is refreshed many times a second, so it must be DIFF-based: build
@@ -186,6 +262,7 @@ export function createUI(callbacks = {}) {
   // (the old approach) thrashed layout and made the whole UI feel laggy.
   let hudCards = new Map(); // slot -> { card, nameEl, scoreEl, bombsEl, rangeEl, speedEl, dead }
   let hudRosterKey = '';
+  let lastArenaName = '';
   let lastRoundText = '';
   let lastTimerText = '';
   let lastTimerDanger = null;
@@ -227,6 +304,7 @@ export function createUI(callbacks = {}) {
   function updateHud(snap, localSlots = []) {
     if (!snap) return;
     const players = [...snap.players].sort((a, b) => a.slot - b.slot);
+    const arenaVisual = getArenaVisual(snap);
 
     // Rebuild only when the roster (slots / names / who is local) changes.
     const rosterKey = players.map((p) => `${p.slot}:${p.name}`).join('|') + '#' + localSlots.join(',');
@@ -243,10 +321,18 @@ export function createUI(callbacks = {}) {
       const mb = String(p.maxBombs); if (c.bombsEl.textContent !== mb) c.bombsEl.textContent = mb;
       const rg = String(p.range);    if (c.rangeEl.textContent !== rg) c.rangeEl.textContent = rg;
       const sp = String(p.speedPicks); if (c.speedEl.textContent !== sp) c.speedEl.textContent = sp;
-      const sh = String(p.shield);   if (c.shieldEl.textContent !== sh) c.shieldEl.textContent = sh;
+      const sh = p.shield > 0 ? `${Math.ceil(p.shieldTime ?? SHIELD_TIME)}s` : '0';
+      if (c.shieldEl.textContent !== sh) c.shieldEl.textContent = sh;
       const badges = (p.ghost > 0 ? '👻' : '') + (p.pierce ? '💥' : '') + (p.kick ? '🦵' : '');
       if (c.badgesEl.textContent !== badges) c.badgesEl.textContent = badges;
       if (c.dead !== !p.alive) { c.dead = !p.alive; c.card.classList.toggle('dead', !p.alive); }
+    }
+
+    if (arenaVisual.name !== lastArenaName) {
+      hudArena.textContent = arenaVisual.name;
+      hudArena.title = arenaVisual.name;
+      hudArena.style.setProperty('--arena-glow', arenaVisual.palette.frameGlow);
+      lastArenaName = arenaVisual.name;
     }
 
     const roundText = `Runde ${snap.round} · Ziel: ${snap.winsToWin} Sieg${snap.winsToWin === 1 ? '' : 'e'}`;
@@ -268,11 +354,28 @@ export function createUI(callbacks = {}) {
     if (danger !== lastTimerDanger) { hudTimer.classList.toggle('danger', danger); lastTimerDanger = danger; }
   }
 
+  function updatePing(ms) {
+    const available = Number.isFinite(ms);
+    hudPing.hidden = !available;
+    hudPing.classList.remove('is-medium', 'is-bad');
+    if (!available) {
+      hudPingValue.textContent = '—';
+      return;
+    }
+
+    const rounded = Math.max(0, Math.round(ms));
+    hudPingValue.textContent = `${rounded} ms`;
+    hudPing.classList.toggle('is-medium', rounded >= 80 && rounded < 160);
+    hudPing.classList.toggle('is-bad', rounded >= 160);
+    hudPing.title = `Verzögerung zum Spielserver: ${rounded} ms`;
+  }
+
   // Reset cached HUD state so the next match rebuilds cleanly, and clear any
   // transient banner left over from a previous match (e.g. sudden death) so it
   // can't flash before the first updateHud of the new round.
   function resetHud() {
     hudRosterKey = '';
+    lastArenaName = '';
     lastRoundText = '';
     lastTimerText = '';
     lastTimerDanger = false;
@@ -338,10 +441,15 @@ export function createUI(callbacks = {}) {
     restartPending = false,
   } = {}) {
     const title = $('result-title');
+    const arenaEl = $('result-arena');
+    const resultPanel = screens.result.querySelector('.result-panel');
     const winnerEl = $('result-winner');
     const isMatch = snap.phase === 'matchover';
     const winnerSlot = isMatch ? snap.matchWinner : snap.winner;
+    const arenaVisual = showArenaSplash(snap);
 
+    arenaEl.textContent = arenaVisual.name;
+    resultPanel.style.setProperty('--arena-glow', arenaVisual.palette.frameGlow);
     title.textContent = isMatch ? 'Spiel vorbei!' : 'Runde vorbei';
 
     if (winnerSlot === null || winnerSlot === undefined) {
@@ -416,6 +524,7 @@ export function createUI(callbacks = {}) {
     resetOnline,
     updateLobby,
     updateHud,
+    updatePing,
     resetHud,
     showResult,
     setResultAction,

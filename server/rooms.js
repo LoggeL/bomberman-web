@@ -304,11 +304,18 @@ function sendError(socket, message) {
   if (socket.readyState === 1) socket.send(encode(MSG.ERROR, { message }));
 }
 
+function onPing(socket, msg) {
+  if (socket.readyState !== 1 || !Number.isSafeInteger(msg.id)) return;
+  socket.send(encode(MSG.PONG, { id: msg.id }));
+}
+
 // Dispatch a decoded client message. `msg` is the object from decode().
 export function handleMessage(socket, msg) {
   if (!msg || typeof msg.type !== 'string') return; // malformed / non-object
 
   switch (msg.type) {
+    case MSG.PING:
+      return onPing(socket, msg);
     case MSG.JOIN:
       return onJoin(socket, msg);
     case MSG.INPUT:

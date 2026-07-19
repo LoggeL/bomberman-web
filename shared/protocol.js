@@ -8,12 +8,14 @@ export const MSG = {
   READY: 'ready',       // { ready: bool }   toggle ready in the lobby
   RESTART: 'restart',   // {}                host requests a new match
   LEAVE: 'leave',       // {}
+  PING: 'ping',         // { id }             RTT probe, also valid before joining a room
 
   // server -> client
   JOINED: 'joined',     // { room, slot, host }  you successfully joined
   LOBBY: 'lobby',       // { room, host, players:[{slot,name,ready}], canStart }
   START: 'start',       // { winsToWin }     match begins
   SNAPSHOT: 'snapshot', // { snap }          full world snapshot (see engine.toSnapshot)
+  PONG: 'pong',         // { id }             echoes the matching PING id
   ERROR: 'error',       // { message }
 };
 

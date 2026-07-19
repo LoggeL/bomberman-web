@@ -77,6 +77,75 @@ body::before {
   width: 100%;
   height: 100%;
   display: block;
+  z-index: 0;
+}
+
+/* -------------------------- Splash artwork --------------------------------
+   One shared layer sits between the canvas and screen chrome. Menu/setup views
+   rotate through the arena art; results pin the artwork for the round's arena.
+   Text and controls remain live DOM above this purely decorative layer. */
+.splash-backdrop {
+  --splash-base: #0a0e1a;
+  --splash-glow: rgba(63, 182, 255, 0.28);
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  background: var(--splash-base);
+  transition: opacity 0.45s ease, visibility 0s linear 0.45s, background-color 0.6s ease;
+}
+.splash-backdrop.is-visible {
+  visibility: visible;
+  opacity: 1;
+  transition-delay: 0s;
+}
+.splash-backdrop::before,
+.splash-backdrop::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.splash-backdrop::before {
+  z-index: 2;
+  background:
+    radial-gradient(ellipse at 50% 43%, rgba(4, 7, 14, 0.04) 0%, rgba(4, 7, 14, 0.18) 46%, rgba(3, 5, 11, 0.72) 100%),
+    linear-gradient(180deg, rgba(4, 7, 14, 0.26), transparent 38%, rgba(4, 6, 12, 0.72));
+}
+.splash-backdrop::after {
+  z-index: 3;
+  opacity: 0.32;
+  background:
+    linear-gradient(180deg, transparent 72%, var(--splash-glow)),
+    repeating-linear-gradient(180deg, transparent 0 3px, rgba(255, 255, 255, 0.018) 3px 4px);
+  mix-blend-mode: screen;
+}
+.splash-art {
+  position: absolute;
+  inset: -2%;
+  z-index: 1;
+  width: 104%;
+  height: 104%;
+  object-fit: cover;
+  object-position: center;
+  opacity: 0;
+  transform: scale(1.035);
+  filter: saturate(1.06) contrast(1.04) brightness(0.88);
+  transition: opacity 1s ease, transform 9s ease;
+  will-change: opacity, transform;
+}
+.splash-art.is-active {
+  opacity: 1;
+  transform: scale(1.075);
+}
+/* Round results use the same art but hold it still so the score remains the
+   only animated focal point. */
+.splash-backdrop.is-static .splash-art {
+  transform: scale(1.045);
+  transition: opacity 0.5s ease;
 }
 
 /* ----------------------------- Screens ----------------------------------- */
@@ -107,8 +176,9 @@ body::before {
 
 /* Dimmed backdrop for modal-like screens. */
 #screen-menu, #screen-local, #screen-online, #screen-result {
-  background: radial-gradient(900px 600px at 50% 40%, rgba(8, 12, 22, 0.55), rgba(4, 6, 12, 0.85));
-  backdrop-filter: blur(3px);
+  background:
+    radial-gradient(900px 600px at 50% 40%, rgba(8, 12, 22, 0.24), rgba(4, 6, 12, 0.68));
+  backdrop-filter: blur(1.5px);
 }
 
 /* ------------------------------ Panels ----------------------------------- */
@@ -440,7 +510,20 @@ body::before {
 }
 .hud-card .hc-stats b { color: var(--text); font-weight: 700; }
 
-.hud-center { text-align: center; pointer-events: none; }
+.hud-center { flex: none; text-align: center; pointer-events: none; }
+.hud-arena {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent-2);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  line-height: 1.25;
+  text-transform: uppercase;
+  text-shadow: 0 0 12px var(--arena-glow, rgba(63, 182, 255, 0.45));
+}
 .hud-round { font-weight: 800; font-size: 16px; letter-spacing: 1px; }
 /* Fixed-ish width so the countdown ticking down never jitters the centre. */
 .hud-timer {
@@ -451,6 +534,41 @@ body::before {
   min-width: 84px;
 }
 .hud-timer.danger { color: var(--accent); font-weight: 700; }
+
+.hud-ping {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 74px;
+  padding: 5px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  background: rgba(18, 24, 41, 0.76);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.6px;
+  pointer-events: none;
+}
+.hud-ping[hidden] { display: none; }
+.hud-ping-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #5dd95d;
+  box-shadow: 0 0 8px rgba(93, 217, 93, 0.8);
+}
+.hud-ping-value { color: var(--text); min-width: 31px; text-align: right; }
+.hud-ping.is-medium .hud-ping-dot {
+  background: #ffcf3f;
+  box-shadow: 0 0 8px rgba(255, 207, 63, 0.8);
+}
+.hud-ping.is-bad .hud-ping-dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(255, 84, 112, 0.8);
+}
 
 .sudden-death-banner {
   position: absolute;
@@ -467,6 +585,15 @@ body::before {
 
 /* ------------------------------ Result ----------------------------------- */
 .result-panel { text-align: center; }
+.result-arena {
+  margin: 0 0 7px;
+  color: var(--accent-2);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  text-shadow: 0 0 14px var(--arena-glow, rgba(63, 182, 255, 0.45));
+}
 .result-winner { font-size: 22px; font-weight: 800; margin: 6px 0 18px; }
 /* Celebratory entrance: the whole winner block scales/fades in... */
 .result-winner { animation: winner-in 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.3) both; }
@@ -528,9 +655,19 @@ body::before {
   .hud-bar { gap: 10px; padding: 8px 10px; }
   .hud-card { min-width: 0; padding: 7px 10px; }
   .hud-card .hc-stats { display: none; }
+  .hud-arena { max-width: 104px; font-size: 9px; letter-spacing: 1px; }
   .hud-timer { min-width: 0; }
+  .hud-ping { min-width: 52px; padding: 5px 7px; }
+  .hud-ping-label { display: none; }
   /* Keep the action buttons reachable but compact on narrow phones. */
   #btn-sound, #btn-quit { padding: 7px 10px; }
+}
+
+/* Generated arena art keeps its live-action subjects near the sides. On tall
+   phones bias toward the left action lane instead of showing only the dark
+   centre strip of a 16:9 image. */
+@media (max-aspect-ratio: 3 / 4) {
+  .splash-art { object-position: 28% center; }
 }
 
 /* Very short viewports (landscape phones): trim vertical chrome so the
@@ -559,6 +696,9 @@ body::before {
     scroll-behavior: auto !important;
   }
   body::before { animation: none; }
+  .splash-art,
+  .splash-art.is-active,
+  .splash-backdrop.is-static .splash-art { transform: none; }
   .btn:hover, .btn:active, .seg-btn:active, #btn-sound:hover { transform: none; }
 }
 

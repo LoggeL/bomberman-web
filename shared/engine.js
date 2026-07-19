@@ -11,25 +11,15 @@
 
 import {
   COLS, ROWS, CELL, POWERUP, TICK_DT,
-  BOMB_FUSE, FLAME_TIME, BRICK_FILL, POWERUP_CHANCE,
+  BOMB_FUSE, FLAME_TIME,
   BASE_SPEED, SPEED_PER_PICKUP, MAX_SPEED_PICKUPS,
   START_BOMBS, START_RANGE, MAX_BOMBS, MAX_RANGE,
-  MAX_SHIELD, SHIELD_INVULN, GHOST_TIME, KICK_SPEED,
+  SHIELD_INVULN, SHIELD_TIME, GHOST_TIME, KICK_SPEED,
   SPAWNS, ROUND_END_DELAY, SUDDEN_DEATH_TIME, SPAWN_BOMB_LOCK,
 } from './constants.js';
+import { generateArena } from './arenas.js';
 
 const PLAYER_HALF = 0.34; // half the player's collision box, in tiles (death/pickup checks)
-
-// ---- seeded RNG (mulberry32) -------------------------------------------------
-function makeRng(seed) {
-  let a = seed >>> 0;
-  return function rng() {
-    a |= 0; a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 const key = (col, row) => row * COLS + col;
 const inBounds = (col, row) => col >= 0 && col < COLS && row >= 0 && row < ROWS;
@@ -53,7 +43,8 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
     matchWinner: null,
     winsToWin,
     seed,
-    rng: makeRng(seed),
+    arenaId: null,
+    arenaTheme: null,
     spiral: null,        // sudden-death cell order
     spiralIdx: 0,
     spiralTimer: 0,
@@ -72,7 +63,8 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
       speedPicks: 0,
       ghost: 0,        // seconds of wallpass remaining (0 = off)
       pierce: false,   // bombs tear through bricks
-      shield: 0,       // absorbs lethal hits
+      shield: 0,       // one-hit blocker while shieldTime remains
+      shieldTime: 0,   // seconds before an unused shield expires
       kick: false,     // can kick bombs
       invuln: 0,       // seconds of i-frames remaining after a shield pop
       score: 0,
@@ -93,53 +85,23 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
 // Builds a fresh map and respawns every player to their corner.
 function generateRound(state) {
   const g = state.grid;
+  const arena = generateArena({ seed: state.seed, round: state.round });
   // `time` is elapsed time for the CURRENT round (it is exposed as `snap.t`
   // and drives sudden death/the HUD), not the lifetime of the match.
   state.time = 0;
   state.phaseTimer = 0;
   state.winner = null;
+  state.arenaId = arena.id;
+  state.arenaTheme = arena.theme;
   state.hidden.clear();
+  for (const [k, kind] of arena.hidden) state.hidden.set(k, kind);
   state.powerups.clear();
   state.bombs.length = 0;
   state.flames.length = 0;
   state.spiral = null;
   state.spiralIdx = 0;
   state.spiralTimer = 0;
-
-  for (let row = 0; row < ROWS; row++) {
-    for (let col = 0; col < COLS; col++) {
-      let cell = CELL.EMPTY;
-      if (col === 0 || row === 0 || col === COLS - 1 || row === ROWS - 1) {
-        cell = CELL.SOLID; // border wall
-      } else if (col % 2 === 0 && row % 2 === 0) {
-        cell = CELL.SOLID; // interior pillar grid
-      }
-      g[key(col, row)] = cell;
-    }
-  }
-
-  // Keep each spawn corner and its two neighbours clear so nobody is boxed in.
-  const clear = new Set();
-  for (let i = 0; i < state.players.length; i++) {
-    const s = SPAWNS[state.players[i].slot];
-    for (const [dc, dr] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      if (inBounds(s.col + dc, s.row + dr)) clear.add(key(s.col + dc, s.row + dr));
-    }
-  }
-
-  // Scatter destructible bricks over the remaining empty cells.
-  for (let row = 1; row < ROWS - 1; row++) {
-    for (let col = 1; col < COLS - 1; col++) {
-      const k = key(col, row);
-      if (g[k] !== CELL.EMPTY || clear.has(k)) continue;
-      if (state.rng() < BRICK_FILL) {
-        g[k] = CELL.BRICK;
-        if (state.rng() < POWERUP_CHANCE) {
-          state.hidden.set(k, weightedPowerup(state.rng));
-        }
-      }
-    }
-  }
+  g.set(arena.grid);
 
   for (const p of state.players) {
     const s = SPAWNS[p.slot];
@@ -160,22 +122,10 @@ function generateRound(state) {
     p.ghost = 0;
     p.pierce = false;
     p.shield = 0;
+    p.shieldTime = 0;
     p.kick = false;
     p.moving = false;
   }
-}
-
-// Weighted hidden-powerup roll. The common stat boosts stay most likely; the
-// flashy abilities (ghost / pierce / shield) are rarer treats.
-function weightedPowerup(rng) {
-  const r = rng();
-  if (r < 0.26) return POWERUP.BOMB;   // 26%
-  if (r < 0.48) return POWERUP.RANGE;  // 22%
-  if (r < 0.62) return POWERUP.SPEED;  // 14%
-  if (r < 0.74) return POWERUP.KICK;   // 12%
-  if (r < 0.84) return POWERUP.GHOST;  // 10%
-  if (r < 0.93) return POWERUP.PIERCE; //  9%
-  return POWERUP.SHIELD;               //  7%
 }
 
 // ---- per-player input --------------------------------------------------------
@@ -422,6 +372,10 @@ export function step(state, dt = TICK_DT) {
     if (!p.alive) continue;
     if (p.invuln > 0) p.invuln = Math.max(0, p.invuln - dt);
     if (p.ghost > 0) p.ghost = Math.max(0, p.ghost - dt);
+    if (p.shieldTime > 0) {
+      p.shieldTime = Math.max(0, p.shieldTime - dt);
+      if (p.shieldTime === 0) p.shield = 0;
+    }
     if (p.bombLock > 0) p.bombLock = Math.max(0, p.bombLock - dt);
     const inp = p._input || {};
 
@@ -476,7 +430,11 @@ export function step(state, dt = TICK_DT) {
     if (!p.alive) continue;
     if (p.invuln > 0) continue;
     if (playerInFlame(state, p)) {
-      if (p.shield > 0) { p.shield -= 1; p.invuln = SHIELD_INVULN; }
+      if (p.shield > 0) {
+        p.shield = 0;
+        p.shieldTime = 0;
+        p.invuln = SHIELD_INVULN;
+      }
       else p.alive = false;
     }
   }
@@ -506,7 +464,10 @@ function applyPowerup(p, kind) {
   else if (kind === POWERUP.SPEED) p.speedPicks = Math.min(MAX_SPEED_PICKUPS, p.speedPicks + 1);
   else if (kind === POWERUP.GHOST) p.ghost = GHOST_TIME; // (re)arm the timer
   else if (kind === POWERUP.PIERCE) p.pierce = true;
-  else if (kind === POWERUP.SHIELD) p.shield = Math.min(MAX_SHIELD, p.shield + 1);
+  else if (kind === POWERUP.SHIELD) {
+    p.shield = 1;
+    p.shieldTime = SHIELD_TIME; // re-arm and refresh the timer
+  }
   else if (kind === POWERUP.KICK) p.kick = true;
 }
 
@@ -527,8 +488,12 @@ function buildSpiral() {
   while (top <= bottom && left <= right) {
     for (let c = left; c <= right; c++) cells.push([c, top]);
     for (let r = top + 1; r <= bottom; r++) cells.push([right, r]);
-    for (let c = right - 1; c >= left; c--) cells.push([c, bottom]);
-    for (let r = bottom - 1; r > top; r--) cells.push([left, r]);
+    if (top < bottom) {
+      for (let c = right - 1; c >= left; c--) cells.push([c, bottom]);
+    }
+    if (left < right) {
+      for (let r = bottom - 1; r > top; r--) cells.push([left, r]);
+    }
     top++; bottom--; left++; right--;
   }
   return cells;
@@ -536,7 +501,11 @@ function buildSpiral() {
 
 function updateSuddenDeath(state, dt) {
   if (state.time < SUDDEN_DEATH_TIME) return;
-  if (!state.spiral) state.spiral = buildSpiral();
+  if (!state.spiral) {
+    // Presets have different permanent-wall masks. Skip cells that are already
+    // solid so every timer pulse creates one effective new wall on every arena.
+    state.spiral = buildSpiral().filter(([col, row]) => state.grid[key(col, row)] !== CELL.SOLID);
+  }
   state.spiralTimer -= dt;
   if (state.spiralTimer > 0) return;
   state.spiralTimer = 0.18; // drop a block every ~0.18s
@@ -576,13 +545,15 @@ export function toSnapshot(state) {
     winner: state.winner,
     matchWinner: state.matchWinner,
     winsToWin: state.winsToWin,
+    arena: { id: state.arenaId, theme: state.arenaTheme },
     grid: Array.from(state.grid),
     powerups,
     players: state.players.map((p) => ({
       slot: p.slot, name: p.name, x: p.x, y: p.y, dir: p.dir,
       alive: p.alive, maxBombs: p.maxBombs, range: p.range,
       speedPicks: p.speedPicks, ghost: p.ghost, pierce: p.pierce,
-      shield: p.shield, kick: p.kick, invuln: p.invuln, bombLock: p.bombLock,
+      shield: p.shield, shieldTime: p.shieldTime,
+      kick: p.kick, invuln: p.invuln, bombLock: p.bombLock,
       score: p.score, moving: p.moving,
       // Movement internals let an online client resume prediction from the
       // exact authoritative point in a tile step instead of rounding to a cell.

@@ -24,6 +24,10 @@ function resolveUrl() {
 export function createNet(handlers = {}) {
   let ws = null;
   let opened = false; // did we ever reach the OPEN state?
+  let pingTimer = null;
+  let pingSequence = 0;
+  let smoothedPing = null;
+  const pendingPings = new Map();
 
   const noop = () => {};
   const h = {
@@ -31,6 +35,7 @@ export function createNet(handlers = {}) {
     onLobby: handlers.onLobby || noop,
     onStart: handlers.onStart || noop,
     onSnapshot: handlers.onSnapshot || noop,
+    onPing: handlers.onPing || noop,
     onError: handlers.onError || noop,
     onClose: handlers.onClose || noop,
   };
@@ -39,6 +44,34 @@ export function createNet(handlers = {}) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(encode(type, payload));
     }
+  }
+
+  function stopPing() {
+    if (pingTimer !== null) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
+    pendingPings.clear();
+    smoothedPing = null;
+  }
+
+  function sendPing() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const id = ++pingSequence;
+    pendingPings.set(id, performance.now());
+    // Bound probes if replies are lost for a long time.
+    if (pendingPings.size > 5) pendingPings.delete(pendingPings.keys().next().value);
+    send(MSG.PING, { id });
+  }
+
+  function receivePong(msg) {
+    const sentAt = pendingPings.get(msg.id);
+    if (sentAt === undefined) return;
+    pendingPings.delete(msg.id);
+    const sample = Math.max(0, performance.now() - sentAt);
+    // A light EWMA keeps the number readable without hiding real latency shifts.
+    smoothedPing = smoothedPing === null ? sample : smoothedPing * 0.7 + sample * 0.3;
+    h.onPing(Math.round(smoothedPing));
   }
 
   function connect() {
@@ -52,7 +85,11 @@ export function createNet(handlers = {}) {
       return;
     }
 
-    ws.addEventListener('open', () => { opened = true; });
+    ws.addEventListener('open', () => {
+      opened = true;
+      sendPing();
+      pingTimer = setInterval(sendPing, 1000);
+    });
 
     ws.addEventListener('message', (ev) => {
       const msg = decode(ev.data);
@@ -62,6 +99,7 @@ export function createNet(handlers = {}) {
         case MSG.LOBBY:    h.onLobby(msg); break;
         case MSG.START:    h.onStart(msg); break;
         case MSG.SNAPSHOT: h.onSnapshot(msg.snap); break;
+        case MSG.PONG:     receivePong(msg); break;
         case MSG.ERROR:    h.onError(msg.message || 'Serverfehler.'); break;
         default: break;
       }
@@ -74,6 +112,8 @@ export function createNet(handlers = {}) {
 
     ws.addEventListener('close', () => {
       const wasOpen = opened;
+      stopPing();
+      h.onPing(null);
       ws = null;
       opened = false;
       h.onClose(wasOpen);
@@ -81,6 +121,8 @@ export function createNet(handlers = {}) {
   }
 
   function close() {
+    stopPing();
+    h.onPing(null);
     if (ws) {
       // Stop our listeners from firing onClose during an intentional teardown.
       try { ws.close(); } catch { /* ignore */ }

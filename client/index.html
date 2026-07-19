@@ -13,6 +13,39 @@
     <!-- The game board. The renderer scales this for devicePixelRatio. -->
     <canvas id="board"></canvas>
 
+    <!-- Decorative arena artwork used behind menus and round results. All
+         meaningful copy remains live HTML in the panels below. -->
+    <div class="splash-backdrop" id="splash-backdrop" aria-hidden="true">
+      <img
+        class="splash-art"
+        data-arena-visual="neon"
+        src="/splashes/neon-reactor.webp"
+        alt=""
+        width="1600"
+        height="900"
+        decoding="async"
+        fetchpriority="high"
+      />
+      <img
+        class="splash-art"
+        data-arena-visual="foundry"
+        src="/splashes/magma-foundry.webp"
+        alt=""
+        width="1600"
+        height="900"
+        decoding="async"
+      />
+      <img
+        class="splash-art"
+        data-arena-visual="frost"
+        src="/splashes/cryo-circuit.webp"
+        alt=""
+        width="1600"
+        height="900"
+        decoding="async"
+      />
+    </div>
+
     <!-- ============================ MAIN MENU ============================ -->
     <section class="screen" id="screen-menu" data-screen="menu">
       <div class="panel menu-panel">
@@ -146,8 +179,14 @@
       <div class="hud-bar">
         <div class="hud-players" id="hud-players"></div>
         <div class="hud-center">
+          <div class="hud-arena" id="hud-arena">Neon Reactor</div>
           <div class="hud-round" id="hud-round">Runde 1</div>
           <div class="hud-timer" id="hud-timer"></div>
+        </div>
+        <div class="hud-ping" id="hud-ping" title="Verzögerung zum Spielserver" hidden>
+          <span class="hud-ping-dot" aria-hidden="true"></span>
+          <span class="hud-ping-label">PING</span>
+          <span class="hud-ping-value" id="hud-ping-value">—</span>
         </div>
         <button class="btn btn-ghost btn-tiny" id="btn-sound" title="Ton an/aus">🔊</button>
         <button class="btn btn-ghost btn-tiny" id="btn-quit">Beenden</button>
@@ -158,6 +197,7 @@
     <!-- ============================= RESULT ============================= -->
     <section class="screen" id="screen-result" data-screen="result">
       <div class="panel result-panel">
+        <div class="result-arena" id="result-arena">Neon Reactor</div>
         <h2 id="result-title">Runde vorbei</h2>
         <div class="result-winner" id="result-winner"></div>
         <div class="result-scores" id="result-scores"></div>

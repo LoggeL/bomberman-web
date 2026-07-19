@@ -14,9 +14,14 @@ import { createLocalInput, createPlayerInput, initTouchControls, setTouchControl
 import { createNet } from './net.js';
 import { createSound } from './sounds.js';
 import {
+  findPickupEffects,
+  PICKUP_POPUP_DURATION_MS,
+} from './pickup-effects.js';
+import {
   advanceFixedPrediction,
   canPredictBomb,
   decayVisualCorrection,
+  interpolateGridPlayer,
   isSnapshotDiscontinuity,
   needsPredictionRebase,
   predictionFromSnapshot,
@@ -66,6 +71,7 @@ let predictionAcc = 0;        // fixed-step prediction accumulator
 let predictionCorrection = { x: 0, y: 0 }; // render-only easing after reconciliation
 let predBombs = [];           // client-predicted own bombs awaiting server confirmation
 let predBombHeld = false;     // bomb-button edge state for local bomb prediction
+let pickupPopups = [];        // newest pickup effect label per player
 
 // HUD refresh throttle (the DOM update itself is diff-based, but there is no
 // point doing the comparisons more than a dozen times a second).
@@ -115,6 +121,7 @@ function startLocal(numPlayers, winsToWin) {
   acc = 0;
   lastResultShown = false;
   localEventSnap = null;
+  clearPickupPopups();
 
   mode = 'local';
   lastHudAt = HUD_INTERVAL; // refresh the HUD on the very first frame
@@ -145,18 +152,20 @@ function stepLocal(frameDt) {
   detectEvents(localEventSnap, snap);
   localEventSnap = snap;
 
-  renderer.draw(snap, { localSlots });
+  renderer.draw(snap, { localSlots, pickupPopups: activePickupPopups() });
   updateHudThrottled(snap, localSlots, frameDt);
 
   // Show the result overlay once when a round/match resolves; keep rendering.
   if ((snap.phase === 'roundover' || snap.phase === 'matchover') && !lastResultShown) {
     ui.showResult(snap, { canRestart: snap.phase === 'matchover' });
+    setTouchControlsVisible(false);
     lastResultShown = true;
   }
   if (snap.phase === 'playing' && lastResultShown) {
     // A new round began (roundover auto-advances in the engine) — back to HUD.
     lastResultShown = false;
     ui.show('hud');
+    setTouchControlsVisible(true);
   }
 }
 
@@ -193,6 +202,7 @@ function connectAndJoin(name, room, winsToWin) {
       curSnap = null;
       snapBuf = [];
       clearPredictionState();
+      clearPickupPopups();
       lastHudAt = HUD_INTERVAL; // refresh the HUD on the very first frame
       if (onlineInput) onlineInput.attach();
       ui.setRestartPending(false);
@@ -212,12 +222,14 @@ function connectAndJoin(name, room, winsToWin) {
         // the board and leaves local prediction/bombs attached to stale state.
         snapBuf = [];
         clearPredictionState();
+        clearPickupPopups();
       }
       curSnap = snap;
       snapBuf.push({ snap, at: performance.now() });
       if (snapBuf.length > 40) snapBuf.shift(); // keep ~1.3 s of history, plenty
       reconcilePrediction(snap);
     },
+    onPing: (ms) => ui.updatePing(ms),
     onError: (msg) => {
       if (restartPending) {
         restartPending = false;
@@ -310,7 +322,7 @@ function tickOnline(frameDt) {
   // buffered snapshots (smooth despite jitter), our own player from prediction.
   const view = interpolatedView();
   if (predicted) {
-    predictionCorrection = decayVisualCorrection(predictionCorrection, frameDt);
+    predictionCorrection = decayVisualCorrection(predictionCorrection, frameDt, predicted);
     const me = view.players.find((p) => p.slot === mySlot);
     if (me) {
       me.x = predicted.x + predictionCorrection.x;
@@ -321,17 +333,19 @@ function tickOnline(frameDt) {
   }
   const render = { ...curSnap, players: view.players, bombs: view.bombs };
 
-  renderer.draw(render, { localSlots: [mySlot] });
+  renderer.draw(render, { localSlots: [mySlot], pickupPopups: activePickupPopups() });
   updateHudThrottled(render, [mySlot], frameDt);
 
   const phase = curSnap.phase;
   if ((phase === 'roundover' || phase === 'matchover') && !resultOpenOnline) {
     showOnlineResult(curSnap);
+    setTouchControlsVisible(false);
     resultOpenOnline = true;
   }
   if (phase === 'playing' && resultOpenOnline) {
     resultOpenOnline = false;
     ui.show('hud');
+    setTouchControlsVisible(true);
   }
 }
 
@@ -384,10 +398,11 @@ function interpolatedView() {
     const pa = a.snap.players.find((q) => q.slot === p.slot);
     const pb = b.snap.players.find((q) => q.slot === p.slot);
     if (!pa || !pb) continue;
-    p.x = pa.x + (pb.x - pa.x) * f;
-    p.y = pa.y + (pb.y - pa.y) * f;
-    p.dir = pb.dir;
-    p.moving = pb.moving;
+    const pose = interpolateGridPlayer(pa, pb, f);
+    p.x = pose.x;
+    p.y = pose.y;
+    p.dir = pose.dir;
+    p.moving = pose.moving;
   }
   return { players, bombs };
 }
@@ -430,20 +445,20 @@ function detectEvents(prev, snap) {
     renderer.shake(Math.min(8 + newCenters * 3, 18));
   }
 
+  for (const pickup of findPickupEffects(prev, snap)) {
+    sound.play('pickup');
+    showPickupPopup(pickup);
+  }
+
   for (const p of snap.players) {
     const o = prev.players.find((q) => q.slot === p.slot);
     if (!o) continue;
-    // Powerup grabbed: a loose powerup under a still-alive player vanished. This
-    // catches every kind — including a redundant ghost/pierce or a maxed stat
-    // that wouldn't show up as a stat increase.
-    if (p.alive) {
-      const col = Math.floor(p.x), row = Math.floor(p.y);
-      const had = prev.powerups.some((pu) => pu.col === col && pu.row === row);
-      const gone = !snap.powerups.some((pu) => pu.col === col && pu.row === row);
-      if (had && gone) sound.play('pickup');
+    // A shield just absorbed a hit. Expiry also drops shield to zero, so the
+    // newly granted i-frames are the unambiguous signal for an actual block.
+    if (p.alive && (p.invuln || 0) > (o.invuln || 0)) {
+      sound.play('shield');
+      renderer.shake(10);
     }
-    // A shield just absorbed a hit (charge dropped but still alive).
-    if (p.alive && p.shield < o.shield) { sound.play('shield'); renderer.shake(10); }
     // Player just died.
     if (o.alive && !p.alive) sound.play('death');
   }
@@ -452,6 +467,31 @@ function detectEvents(prev, snap) {
   if (prev.phase === 'playing' && snap.phase !== 'playing') {
     sound.play(snap.winner === null || snap.winner === undefined ? 'draw' : 'win');
   }
+}
+
+function showPickupPopup(effect) {
+  const startedAt = performance.now();
+  pickupPopups = pickupPopups.filter((popup) => popup.slot !== effect.slot);
+  pickupPopups.push({
+    ...effect,
+    startedAt,
+    until: startedAt + PICKUP_POPUP_DURATION_MS,
+  });
+}
+
+function activePickupPopups() {
+  const timestamp = performance.now();
+  pickupPopups = pickupPopups.filter((popup) => popup.until > timestamp);
+  return pickupPopups.map((popup) => ({
+    slot: popup.slot,
+    text: popup.text,
+    color: popup.color,
+    progress: (timestamp - popup.startedAt) / PICKUP_POPUP_DURATION_MS,
+  }));
+}
+
+function clearPickupPopups() {
+  pickupPopups = [];
 }
 
 // ===========================================================================
@@ -530,6 +570,7 @@ function teardownLocal() {
   localSlots = [];
   lastResultShown = false;
   localEventSnap = null;
+  clearPickupPopups();
 }
 
 function teardownOnline() {
@@ -548,8 +589,10 @@ function resetOnlineState() {
   resultOpenOnline = false;
   restartPending = false;
   lastSentInput = null;
+  clearPickupPopups();
   clearPredictionState();
   ui.setRestartPending(false);
+  ui.updatePing(null);
 }
 
 function clearPredictionState() {
