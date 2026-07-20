@@ -122,7 +122,11 @@ function rawDeck(seed, cycle) {
   return deck;
 }
 
-function presetForRound(seed, round) {
+function presetForRound(seed, round, selection = 'shuffle') {
+  if (selection !== 'shuffle') {
+    const selected = PRESETS.find((preset) => preset.id === selection);
+    if (selected) return selected;
+  }
   const roundIndex = Math.max(0, Math.floor(Number(round) || 1) - 1);
   const cycle = Math.floor(roundIndex / PRESETS.length);
   const slot = roundIndex % PRESETS.length;
@@ -166,13 +170,15 @@ function symmetryOrbit(col, row) {
 
 function weightedPowerup(rng) {
   const r = rng();
-  if (r < 0.26) return POWERUP.BOMB;
-  if (r < 0.48) return POWERUP.RANGE;
-  if (r < 0.62) return POWERUP.SPEED;
-  if (r < 0.74) return POWERUP.KICK;
-  if (r < 0.84) return POWERUP.GHOST;
-  if (r < 0.93) return POWERUP.PIERCE;
-  return POWERUP.SHIELD;
+  if (r < 0.23) return POWERUP.BOMB;
+  if (r < 0.42) return POWERUP.RANGE;
+  if (r < 0.55) return POWERUP.SPEED;
+  if (r < 0.66) return POWERUP.KICK;
+  if (r < 0.76) return POWERUP.GHOST;
+  if (r < 0.85) return POWERUP.PIERCE;
+  if (r < 0.91) return POWERUP.SHIELD;
+  if (r < 0.96) return POWERUP.REMOTE;
+  return POWERUP.THROW;
 }
 
 function validatePresets() {
@@ -231,10 +237,15 @@ function validatePresets() {
 
 validatePresets();
 
-export function generateArena({ seed, round }) {
-  const preset = presetForRound(seed, round);
+export function generateArena({ seed, round, arena = 'shuffle', powerupRate = 'normal' }) {
+  const preset = presetForRound(seed, round, arena);
   const grid = new Uint8Array(COLS * ROWS);
   const hidden = new Map();
+  const powerupChance = powerupRate === 'low'
+    ? 0.24
+    : powerupRate === 'high'
+      ? 0.64
+      : POWERUP_CHANCE;
 
   for (let row = 0; row < ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
@@ -255,7 +266,7 @@ export function generateArena({ seed, round }) {
       if (rng() >= BRICK_FILL) continue;
       for (const cellKey of orbit) grid[cellKey] = CELL.BRICK;
 
-      if (rng() < POWERUP_CHANCE) {
+      if (rng() < powerupChance) {
         const kind = weightedPowerup(rng);
         for (const cellKey of orbit) hidden.set(cellKey, kind);
       }

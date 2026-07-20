@@ -20,18 +20,12 @@ import {
   MIN_PLAYERS, MAX_PLAYERS, TICK_DT, TICK_HZ,
 } from '../shared/constants.js';
 import { createGame, step, setInput, toSnapshot } from '../shared/engine.js';
-
-// Default round wins that decide a match. The room creator (host) may override
-// this via the JOIN payload; clampWins keeps it in a sane range.
-const WINS_TO_WIN = 3;
-function clampWins(n) {
-  const v = Math.floor(Number(n));
-  if (!Number.isFinite(v)) return WINS_TO_WIN;
-  return Math.max(1, Math.min(9, v));
-}
+import { DEFAULT_RULES, normalizeRules } from '../shared/rules.js';
 
 // Idle input applied to a player whose socket has gone away mid-match.
-const IDLE_INPUT = { up: false, down: false, left: false, right: false, bomb: false };
+const IDLE_INPUT = {
+  up: false, down: false, left: false, right: false, bomb: false, action: false,
+};
 
 // Clients send input only when it changes. Keep a short ordered queue so two
 // transitions received between simulation ticks (notably press -> release) are
@@ -73,7 +67,7 @@ function makeSeed() {
 class Room {
   constructor(code) {
     this.code = code;
-    this.winsToWin = WINS_TO_WIN; // set by the host when the room is created
+    this.rules = DEFAULT_RULES; // replaced with normalized host rules on creation
     // members: array indexed by slot. null = free slot.
     /** @type {(Member|null)[]} */
     this.members = new Array(MAX_PLAYERS).fill(null);
@@ -91,6 +85,8 @@ class Room {
 
   // First free slot, or -1 if the room is full.
   freeSlot() {
+    const humanCapacity = this.rules.playerTarget - this.rules.botCount;
+    if (this.count >= humanCapacity) return -1;
     return this.members.findIndex((m) => m === null);
   }
 
@@ -131,7 +127,16 @@ class Room {
 
     // If the room is mid-match, neutralise the departed player's input so the
     // engine sees them standing still rather than holding their last keys.
-    if (this.game) setInput(this.game, slot, IDLE_INPUT);
+    if (this.game) {
+      setInput(this.game, slot, IDLE_INPUT);
+      const player = this.game.players.find((candidate) => candidate.slot === slot);
+      // A disconnect during the round-result delay must also become a bot:
+      // the same engine player respawns when the next round is generated.
+      if (player && this.game.phase !== 'matchover') {
+        player.bot = true;
+        player.name = `${member.name} Bot`;
+      }
+    }
 
     // Hand off host duty to the lowest remaining slot.
     if (this.hostSlot === slot) {
@@ -145,13 +150,18 @@ class Room {
   // canStart = enough players AND everyone ready.
   canStart() {
     const list = this.memberList;
-    return list.length >= MIN_PLAYERS && list.every((m) => m.ready);
+    const playableCount = list.length + this.rules.botCount;
+    return playableCount >= MIN_PLAYERS &&
+      playableCount >= this.rules.playerTarget &&
+      list.every((m) => m.ready);
   }
 
   lobbyPayload() {
     return {
       room: this.code,
       host: this.hostSlot,
+      rules: this.rules,
+      playableCount: this.count + this.rules.botCount,
       players: this.memberList.map((m) => ({
         slot: m.slot,
         name: m.name,
@@ -186,7 +196,19 @@ class Room {
       slot: m.slot,
       name: m.name,
     }));
-    this.game = createGame(playerDefs, { seed: makeSeed(), winsToWin: this.winsToWin });
+    let botNumber = 1;
+    for (let slot = 0; slot < MAX_PLAYERS && botNumber <= this.rules.botCount; slot++) {
+      if (playerDefs.some((player) => player.slot === slot)) continue;
+      playerDefs.push({
+        id: `bot${slot}`,
+        slot,
+        name: `Bot ${botNumber}`,
+        bot: true,
+      });
+      botNumber++;
+    }
+    playerDefs.sort((a, b) => a.slot - b.slot);
+    this.game = createGame(playerDefs, { seed: makeSeed(), rules: this.rules });
 
     // Reset both the engine and the member-side held/queued input. Resetting only
     // the engine would let tick() immediately reapply a stale key from the
@@ -197,13 +219,17 @@ class Room {
       setInput(this.game, m.slot, IDLE_INPUT);
     }
 
-    this.broadcast(encode(MSG.START, { winsToWin: this.winsToWin }));
+    this.broadcast(encode(MSG.START, {
+      winsToWin: this.rules.winsToWin,
+      rules: this.rules,
+    }));
     this.startLoop();
   }
 
   // Restart only makes sense once a match has fully resolved.
   restartMatch() {
-    if (!this.game || this.game.phase !== 'matchover' || this.count < MIN_PLAYERS) return false;
+    if (!this.game || this.game.phase !== 'matchover' ||
+        this.count + this.rules.botCount < this.rules.playerTarget) return false;
     this.stopLoop();
     // Wipe ready flags and scores by rebuilding the game from scratch.
     this.startMatch();
@@ -347,7 +373,7 @@ function onJoin(socket, msg) {
     // Create a brand new room; this socket becomes its host and picks the
     // match length.
     room = new Room(makeRoomCode());
-    room.winsToWin = clampWins(msg.winsToWin);
+    room.rules = normalizeRules(msg.rules || { winsToWin: msg.winsToWin });
     rooms.set(room.code, room);
   } else {
     room = rooms.get(requested);
@@ -401,6 +427,7 @@ function onInput(socket, msg) {
     left: !!inp.left,
     right: !!inp.right,
     bomb: !!inp.bomb,
+    action: !!inp.action,
   };
 
   // Ignore duplicate states (the browser already dedupes, but the server must
@@ -413,7 +440,7 @@ function onInput(socket, msg) {
 
 function sameInput(a, b) {
   return a.up === b.up && a.down === b.down && a.left === b.left &&
-         a.right === b.right && a.bomb === b.bomb;
+         a.right === b.right && a.bomb === b.bomb && a.action === b.action;
 }
 
 function onReady(socket, msg) {
@@ -436,8 +463,9 @@ function onRestart(socket) {
   if (!room) return;
   // Only the host may restart, and only after the match is over.
   if (room.hostSlot !== socket._slot) return;
-  if (room.game?.phase === 'matchover' && room.count < MIN_PLAYERS) {
-    sendError(socket, 'At least two players are required for a rematch.');
+  if (room.game?.phase === 'matchover' &&
+      room.count + room.rules.botCount < room.rules.playerTarget) {
+    sendError(socket, 'Not enough players for the configured rematch.');
     return;
   }
   room.restartMatch();

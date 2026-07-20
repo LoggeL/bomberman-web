@@ -3,8 +3,8 @@
 
 export const MSG = {
   // client -> server
-  JOIN: 'join',         // { name, room, winsToWin? }  room '' => create a fresh room (winsToWin honoured for the creator)
-  INPUT: 'input',       // { input: {up,down,left,right,bomb} }
+  JOIN: 'join',         // { name, room, rules? }  room '' => create a room with normalized host rules
+  INPUT: 'input',       // { input: {up,down,left,right,bomb,action} }
   READY: 'ready',       // { ready: bool }   toggle ready in the lobby
   RESTART: 'restart',   // {}                host requests a new match
   LEAVE: 'leave',       // {}
@@ -12,8 +12,8 @@ export const MSG = {
 
   // server -> client
   JOINED: 'joined',     // { room, slot, host }  you successfully joined
-  LOBBY: 'lobby',       // { room, host, players:[{slot,name,ready}], canStart }
-  START: 'start',       // { winsToWin }     match begins
+  LOBBY: 'lobby',       // { room, host, players, rules, playableCount, canStart }
+  START: 'start',       // { winsToWin, rules }     match begins
   SNAPSHOT: 'snapshot', // { snap }          full world snapshot (see engine.toSnapshot)
   PONG: 'pong',         // { id }             echoes the matching PING id
   ERROR: 'error',       // { message }

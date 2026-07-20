@@ -11,6 +11,8 @@ const EFFECTS = Object.freeze({
   [POWERUP.PIERCE]: Object.freeze({ text: 'Durchschlag +1', color: '#ff8a3f' }),
   [POWERUP.SHIELD]: Object.freeze({ text: `Schild · ${SHIELD_TIME}s`, color: '#3fe0ff' }),
   [POWERUP.KICK]: Object.freeze({ text: 'Bomben-Kick aktiv', color: '#ff7ed4' }),
+  [POWERUP.REMOTE]: Object.freeze({ text: 'Fernzünder aktiv', color: '#8fe7ff' }),
+  [POWERUP.THROW]: Object.freeze({ text: 'Bombenwurf aktiv', color: '#f4a8ff' }),
 });
 
 export function getPickupEffect(kind) {

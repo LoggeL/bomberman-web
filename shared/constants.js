@@ -22,6 +22,8 @@ export const POWERUP = {
   PIERCE: 5, // +1 destructible-wall penetration per blast direction
   SHIELD: 6, // absorb one otherwise-lethal blast, expiring after a short window
   KICK: 7, // kick a bomb you walk into so it slides until it hits something
+  REMOTE: 8, // secondary action detonates the oldest owned remote bomb
+  THROW: 9, // secondary action throws the bomb directly in front of the player
 };
 
 // Simulation tuning.
@@ -47,6 +49,8 @@ export const SHIELD_INVULN = 1.2;   // seconds of i-frames after a shield absorb
 export const SHIELD_TIME = 10;      // seconds before an unused shield expires
 export const GHOST_TIME = 5;        // seconds of wallpass per GHOST pickup (re-arms on pickup)
 export const KICK_SPEED = 7.5;      // tiles/second a kicked bomb slides
+export const BOMB_THROW_DISTANCE = 3; // maximum landing distance beyond the picked bomb
+export const BOMB_THROW_TIME = 0.38;  // seconds spent airborne
 export const SPAWN_BOMB_LOCK = 1.0; // seconds after spawn before bombs can be placed
 
 // Players spawn in the four corners. Order matters: P1..P4.

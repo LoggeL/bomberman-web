@@ -232,6 +232,8 @@ ok('shield' in round.players[0] && 'shieldTime' in round.players[0] &&
   'snapshot carries ability fields');
 ok(round.arena?.id === g.arenaId && round.arena?.theme === g.arenaTheme,
   'snapshot carries arena identity and render theme');
+snap.teamScores[0] = 99;
+ok(g.teamScores[0] !== 99, 'snapshot team scores do not alias mutable engine state');
 
 console.log('snapshot carries prediction and bomb ownership state');
 {
@@ -254,6 +256,7 @@ console.log('round reset clears powerups but keeps score');
   const gg = createGame(defs, { seed: 31, winsToWin: 3 });
   const p0 = gg.players[0], p1 = gg.players[1];
   p0.maxBombs = 4; p0.range = 5; p0.speedPicks = 2; p0.pierce = 3; p0.kick = true;
+  p0.remote = true; p0.throwBombs = true;
   p0.shield = 1; p0.shieldTime = 6; p0.ghost = 3;
   p1.alive = false;
   step(gg, TICK_DT); // resolves round, awards p0 one score
@@ -261,7 +264,8 @@ console.log('round reset clears powerups but keeps score');
   ok(gg.phase === 'playing' && gg.round === 2, 'new round started after roundover delay');
   ok(p0.score === 1, 'score persists across rounds');
   ok(p0.maxBombs === 1 && p0.range === 2 && p0.speedPicks === 0 &&
-     p0.pierce === 0 && !p0.kick && p0.shield === 0 && p0.shieldTime === 0 && p0.ghost === 0,
+     p0.pierce === 0 && !p0.kick && !p0.remote && !p0.throwBombs &&
+     p0.shield === 0 && p0.shieldTime === 0 && p0.ghost === 0,
     'all powerups reset at new round spawn');
 }
 
@@ -451,6 +455,152 @@ console.log('PIERCE stacks cross one additional brick each');
      twoStacks.grid[1 * COLS + 3] === CELL.EMPTY &&
      twoStacks.grid[1 * COLS + 4] === CELL.EMPTY,
     'two stacks cross two bricks and reach the third');
+}
+
+console.log('REMOTE detonates the oldest owned remote bomb');
+{
+  const gg = createGame(defs, { seed: 47, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.remote = true;
+  pp.bombLock = 0;
+  setInput(gg, 0, { bomb: true });
+  step(gg, TICK_DT);
+  setInput(gg, 0, { bomb: false });
+  const remoteId = gg.bombs[0]?.id;
+  pp.x = 3.5; pp.y = 3.5;
+  setInput(gg, 0, { action: true });
+  step(gg, TICK_DT);
+  ok(remoteId !== undefined && !gg.bombs.some((bomb) => bomb.id === remoteId),
+    'secondary action detonated the remote bomb before its fuse');
+  ok(gg.flames.some((flame) => flame.col === 1 && flame.row === 1),
+    'remote detonation produced the normal blast');
+}
+
+console.log('THROW arcs an adjacent bomb to the farthest valid landing cell');
+{
+  const gg = createGame(defs, { seed: 49, winsToWin: 2 });
+  const pp = gg.players[0];
+  pp.throwBombs = true;
+  pp.dir = 'right';
+  pp.x = 1.5; pp.y = 1.5;
+  for (let col = 1; col <= 5; col++) gg.grid[1 * COLS + col] = CELL.EMPTY;
+  const bomb = {
+    id: 900, col: 2, row: 1, x: 2.5, y: 1.5, z: 0,
+    vx: 0, vy: 0, airTime: 0, owner: 1, timer: 99, range: 2, pierce: 0,
+  };
+  gg.bombs.push(bomb);
+  setInput(gg, 0, { action: true });
+  step(gg, TICK_DT);
+  ok(bomb.col === 5 && bomb.row === 1 && bomb.airTime > 0 && bomb.z > 0,
+    'throw reserved a three-cell landing and entered an airborne arc');
+  setInput(gg, 0, {});
+  for (let i = 0; i < 30; i++) step(gg, TICK_DT);
+  ok(bomb.airTime === 0 && bomb.x === 5.5 && bomb.y === 1.5 && bomb.z === 0,
+    'thrown bomb landed exactly on the reserved cell');
+}
+
+console.log('2v2 resolves and scores by surviving team');
+{
+  const gg = createGame(defs4, {
+    seed: 51,
+    rules: { mode: 'teams', playerTarget: 4, winsToWin: 2 },
+  });
+  gg.players[2].alive = false;
+  gg.players[3].alive = false;
+  step(gg, TICK_DT);
+  ok(gg.phase === 'roundover' && gg.winnerTeam === 0 && gg.teamScores[0] === 1,
+    'eliminating both opponents awards one team round');
+  ok(gg.players[0].score === 1 && gg.players[1].score === 1,
+    'both teammates expose the shared team score');
+  for (let i = 0; i < 200; i++) step(gg, TICK_DT);
+  gg.players[2].alive = false;
+  gg.players[3].alive = false;
+  step(gg, TICK_DT);
+  ok(gg.phase === 'matchover' && gg.matchWinnerTeam === 0 && gg.teamScores[0] === 2,
+    'team reaches match victory at the configured win target');
+}
+
+console.log('arena mechanics run through the shared engine');
+{
+  const portals = createGame(defs, {
+    seed: 53,
+    rules: { arena: 'classic', winsToWin: 2 },
+  });
+  const portalPlayer = portals.players[0];
+  portalPlayer.x = 7.5; portalPlayer.y = 1.5;
+  step(portals, TICK_DT);
+  ok(portalPlayer.x === 7.5 && portalPlayer.y === 11.5 && portalPlayer.teleportSeq === 1,
+    'Neon portal moves the player to its paired endpoint');
+  ok(toSnapshot(portals).mechanic?.kind === 'portals',
+    'arena mechanic state is carried by snapshots');
+
+  const blockedPortal = createGame(defs, {
+    seed: 54,
+    rules: { arena: 'classic', winsToWin: 2 },
+  });
+  const blockedPlayer = blockedPortal.players[0];
+  blockedPlayer.x = 7.5; blockedPlayer.y = 1.5;
+  blockedPortal.grid[11 * COLS + 7] = CELL.SOLID;
+  step(blockedPortal, TICK_DT);
+  ok(blockedPlayer.x === 7.5 && blockedPlayer.y === 1.5 &&
+     blockedPlayer.teleportSeq === undefined,
+  'a portal never embeds a player in a sudden-death wall');
+
+  const lava = createGame(defs, {
+    seed: 55,
+    rules: { arena: 'crossroads', winsToWin: 2 },
+  });
+  lava.mechanic.elapsed = 3.59;
+  lava.players[0].x = 5.5; lava.players[0].y = 3.5;
+  step(lava, TICK_DT);
+  ok(!lava.players[0].alive, 'Foundry vent becomes lethal after its telegraph');
+
+  const ice = createGame(defs, {
+    seed: 57,
+    rules: { arena: 'citadel', winsToWin: 2 },
+  });
+  const icePlayer = ice.players[0];
+  icePlayer.x = 3.5; icePlayer.y = 6.5;
+  icePlayer.dir = 'right'; icePlayer.moving = true;
+  setInput(ice, 0, {});
+  step(ice, TICK_DT);
+  ok(icePlayer.x > 3.5 && icePlayer.dir === 'right',
+    'Cryo ice preserves forward momentum without held input');
+
+  const rails = createGame(defs, {
+    seed: 59,
+    rules: { arena: 'switchyard', winsToWin: 2 },
+  });
+  const railBomb = {
+    id: 901, col: 5, row: 3, x: 5.5, y: 3.5, z: 0,
+    vx: 0, vy: 0, airTime: 0, owner: 1, timer: 99, range: 2, pierce: 0,
+  };
+  rails.bombs.push(railBomb);
+  rails.mechanic.elapsed = 0.39;
+  step(rails, TICK_DT);
+  ok(railBomb.col === 6 && railBomb.row === 3,
+    'Switchyard rail advances a stationary bomb on its pulse');
+}
+
+console.log('bots make deterministic human-shaped decisions');
+{
+  const botDefs = [
+    { id: 'human', slot: 0, name: 'Mensch' },
+    { id: 'bot', slot: 1, name: 'Bot', bot: true },
+  ];
+  const a = createGame(botDefs, { seed: 61, rules: { arena: 'citadel', winsToWin: 3 } });
+  const b = createGame(botDefs, { seed: 61, rules: { arena: 'citadel', winsToWin: 3 } });
+  const start = { x: a.players[1].x, y: a.players[1].y };
+  let acted = false;
+  for (let i = 0; i < 360; i++) {
+    step(a, TICK_DT);
+    step(b, TICK_DT);
+    acted ||= a.players[1].x !== start.x || a.players[1].y !== start.y ||
+      a.bombs.some((bomb) => bomb.owner === 1);
+  }
+  ok(acted, 'bot moved or placed a bomb without a caller-side controller');
+  ok(JSON.stringify(toSnapshot(a)) === JSON.stringify(toSnapshot(b)),
+    'same seed and ticks produce identical bot gameplay');
 }
 
 console.log('SHIELD is temporary and absorbs one lethal hit');

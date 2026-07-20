@@ -461,9 +461,110 @@ export function createRenderer(canvas) {
       // top highlight
       c.fillStyle = palette.brickHighlight;
       c.fillRect(x + 2, y + 2, t - 4, Math.max(1, t * 0.08));
+    } else if (palette.brickTint) {
+      // Keep the authored texture and cracks, but shift the destructible atlas
+      // cell toward a map-specific accent. source-atop confines the wash to the
+      // already-drawn tile instead of painting an opaque square around it.
+      c.save();
+      c.globalCompositeOperation = 'source-atop';
+      c.globalAlpha = palette.brickTintAlpha ?? 0.35;
+      c.fillStyle = palette.brickTint;
+      roundRect(c, x + 1, y + 1, t - 2, t - 2, 4);
+      c.fill();
+      c.restore();
+    }
+
+    if (palette.brickEdge) {
+      c.strokeStyle = palette.brickEdge;
+      c.lineWidth = Math.max(1, t * 0.035);
+      roundRect(c, x + 1.5, y + 1.5, t - 3, t - 3, 4);
+      c.stroke();
     }
 
     drawBreakableCue(c, x, y, t);
+  }
+
+  // ---- arena mechanics (dynamic floor overlays) ---------------------------
+
+  function drawArenaMechanic(mechanic) {
+    if (!mechanic || mechanic.kind === 'none') return;
+    const pulse = 0.5 + 0.5 * Math.sin(now() * 5);
+
+    ctx.save();
+    if (mechanic.kind === 'portals') {
+      for (const portal of mechanic.portals || []) {
+        const x = px(portal.col) + tile / 2;
+        const y = py(portal.row) + tile / 2;
+        const color = portal.id === 'north' ? '#50d8ff' : '#ec65ff';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(2, tile * 0.06);
+        ctx.shadowColor = color;
+        ctx.shadowBlur = tile * (0.25 + pulse * 0.25);
+        ctx.beginPath();
+        ctx.ellipse(x, y, tile * (0.29 + pulse * 0.03), tile * 0.18, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 0.22 + pulse * 0.12;
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    } else if (mechanic.kind === 'lava') {
+      for (const vent of mechanic.vents || []) {
+        const x = px(vent.col), y = py(vent.row);
+        const active = vent.state === 'active';
+        const warning = vent.state === 'telegraph';
+        ctx.fillStyle = active
+          ? `rgba(255, 70, 22, ${0.58 + pulse * 0.22})`
+          : warning
+            ? `rgba(255, 190, 45, ${0.18 + pulse * 0.2})`
+            : 'rgba(115, 45, 24, 0.2)';
+        ctx.strokeStyle = active ? '#fff0a6' : warning ? '#ffbd3f' : 'rgba(255, 120, 65, 0.35)';
+        ctx.lineWidth = Math.max(1.5, tile * 0.045);
+        ctx.shadowColor = active ? '#ff4a22' : '#ff9b3f';
+        ctx.shadowBlur = active || warning ? tile * 0.38 : 0;
+        roundRect(ctx, x + tile * 0.13, y + tile * 0.13, tile * 0.74, tile * 0.74, tile * 0.18);
+        ctx.fill();
+        ctx.stroke();
+      }
+    } else if (mechanic.kind === 'ice') {
+      for (const cell of mechanic.cells || []) {
+        const x = px(cell.col), y = py(cell.row);
+        ctx.fillStyle = 'rgba(136, 226, 255, 0.13)';
+        ctx.strokeStyle = 'rgba(200, 248, 255, 0.34)';
+        ctx.lineWidth = Math.max(1, tile * 0.025);
+        roundRect(ctx, x + tile * 0.06, y + tile * 0.06, tile * 0.88, tile * 0.88, tile * 0.18);
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + tile * 0.22, y + tile * 0.72);
+        ctx.lineTo(x + tile * 0.72, y + tile * 0.22);
+        ctx.stroke();
+      }
+    } else if (mechanic.kind === 'rails') {
+      for (const rail of mechanic.rails || []) {
+        const x = px(rail.col), y = py(rail.row);
+        ctx.fillStyle = 'rgba(175, 255, 87, 0.1)';
+        ctx.strokeStyle = 'rgba(190, 255, 105, 0.42)';
+        ctx.lineWidth = Math.max(1.5, tile * 0.04);
+        roundRect(ctx, x + tile * 0.09, y + tile * 0.18, tile * 0.82, tile * 0.64, tile * 0.12);
+        ctx.fill();
+        ctx.stroke();
+        if (rail.dx || rail.dy) {
+          const cx = x + tile / 2, cy = y + tile / 2;
+          const dx = rail.dx * tile * 0.22, dy = rail.dy * tile * 0.22;
+          ctx.beginPath();
+          ctx.moveTo(cx - dx, cy - dy);
+          ctx.lineTo(cx + dx, cy + dy);
+          ctx.lineTo(cx + dx - rail.dx * tile * 0.12 + rail.dy * tile * 0.12,
+            cy + dy - rail.dy * tile * 0.12 - rail.dx * tile * 0.12);
+          ctx.moveTo(cx + dx, cy + dy);
+          ctx.lineTo(cx + dx - rail.dx * tile * 0.12 - rail.dy * tile * 0.12,
+            cy + dy - rail.dy * tile * 0.12 + rail.dx * tile * 0.12);
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
   }
 
   // ---- powerups (dynamic) ---------------------------------------------------
@@ -482,7 +583,9 @@ export function createRenderer(canvas) {
     else if (kind === POWERUP.GHOST) { color = '#b98cff'; glyph = 'ghost'; }
     else if (kind === POWERUP.PIERCE) { color = '#ff8a3f'; glyph = 'pierce'; }
     else if (kind === POWERUP.KICK) { color = '#ff7ed4'; glyph = 'kick'; }
-    else { color = '#3fe0ff'; glyph = 'shield'; }
+    else if (kind === POWERUP.SHIELD) { color = '#3fe0ff'; glyph = 'shield'; }
+    else if (kind === POWERUP.REMOTE) { color = '#8fe7ff'; glyph = 'remote'; }
+    else { color = '#f4a8ff'; glyph = 'throw'; }
 
     // glowing pill (one shadowBlur use per powerup; there are only a few on
     // screen at once, so this stays cheap)
@@ -604,6 +707,34 @@ export function createRenderer(canvas) {
       ctx.moveTo(r * 0.52, 0); ctx.lineTo(r * 0.3, -r * 0.2);
       ctx.moveTo(r * 0.52, 0); ctx.lineTo(r * 0.3, r * 0.2);
       ctx.stroke();
+    } else if (glyph === 'remote') {
+      // antenna with two radio-wave arcs
+      ctx.beginPath();
+      ctx.arc(0, r * 0.34, r * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0, r * 0.2);
+      ctx.lineTo(0, -r * 0.45);
+      ctx.stroke();
+      for (const radius of [r * 0.34, r * 0.58]) {
+        ctx.beginPath();
+        ctx.arc(0, -r * 0.38, radius, Math.PI * 1.15, Math.PI * 1.85);
+        ctx.stroke();
+      }
+    } else if (glyph === 'throw') {
+      // glove/hand shape with a rising throw arc
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.48, r * 0.32);
+      ctx.lineTo(-r * 0.2, -r * 0.12);
+      ctx.lineTo(-r * 0.05, r * 0.05);
+      ctx.lineTo(r * 0.08, -r * 0.32);
+      ctx.lineTo(r * 0.25, -r * 0.24);
+      ctx.lineTo(r * 0.18, r * 0.04);
+      ctx.lineTo(r * 0.42, -r * 0.08);
+      ctx.lineTo(r * 0.5, r * 0.12);
+      ctx.lineTo(r * 0.14, r * 0.5);
+      ctx.closePath();
+      ctx.fill();
     } else {
       // shield crest
       ctx.beginPath();
@@ -667,12 +798,22 @@ export function createRenderer(canvas) {
     const bx = b.x != null ? b.x : b.col + 0.5;
     const by = b.y != null ? b.y : b.row + 0.5;
     const x = px(0) + bx * tile;
-    const y = py(0) + by * tile;
+    const groundY = py(0) + by * tile;
+    const y = groundY - Math.max(0, b.z || 0) * tile;
     // pulse faster as the fuse runs down
     const frac = Math.max(0, Math.min(1, b.timer / BOMB_FUSE));
     const speed = 6 + (1 - frac) * 22;
     const pulse = 1 + Math.sin(now() * speed) * 0.08 * (1.2 - frac);
     const r = tile * 0.34 * pulse;
+
+    if (b.z > 0) {
+      ctx.save();
+      ctx.fillStyle = `rgba(0, 0, 0, ${0.28 - Math.min(0.16, b.z * 0.12)})`;
+      ctx.beginPath();
+      ctx.ellipse(x, groundY + tile * 0.24, r * 0.78, r * 0.32, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
 
     ctx.save();
     // body with a soft red glow that intensifies near detonation
@@ -1016,6 +1157,8 @@ export function createRenderer(canvas) {
     ctx.save();
     roundRect(ctx, originX, originY, boardW, boardH, 8);
     ctx.clip();
+
+    drawArenaMechanic(snap.mechanic);
 
     // blast-range preview (faint ghost of where each live bomb will reach),
     // drawn under everything dynamic so it reads as a floor warning

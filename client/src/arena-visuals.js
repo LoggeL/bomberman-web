@@ -35,6 +35,7 @@ export const ARENA_VISUALS = Object.freeze({
       brickBase: '#6b4630',
       brickMortar: 'rgba(0, 0, 0, 0.28)',
       brickHighlight: 'rgba(255, 200, 150, 0.14)',
+      brickEdge: 'rgba(255, 157, 87, 0.54)',
     },
   }),
 
@@ -58,9 +59,13 @@ export const ARENA_VISUALS = Object.freeze({
       solidHighlight: 'rgba(255, 184, 120, 0.18)',
       solidShadow: 'rgba(19, 5, 2, 0.45)',
       solidEdge: 'rgba(255, 126, 73, 0.36)',
-      brickBase: '#843e25',
+      // Warm copper separates destructible plates from the charcoal machinery.
+      brickBase: '#a6532d',
       brickMortar: 'rgba(26, 7, 3, 0.46)',
       brickHighlight: 'rgba(255, 202, 132, 0.20)',
+      brickTint: '#b6532c',
+      brickTintAlpha: 0.36,
+      brickEdge: 'rgba(255, 153, 75, 0.62)',
     },
   }),
 
@@ -84,9 +89,13 @@ export const ARENA_VISUALS = Object.freeze({
       solidHighlight: 'rgba(218, 250, 255, 0.22)',
       solidShadow: 'rgba(0, 10, 20, 0.42)',
       solidEdge: 'rgba(133, 225, 255, 0.42)',
-      brickBase: '#426d7f',
-      brickMortar: 'rgba(1, 19, 31, 0.43)',
-      brickHighlight: 'rgba(226, 252, 255, 0.22)',
+      // Lavender ice reads apart from the cyan permanent crystal pillars.
+      brickBase: '#665f9f',
+      brickMortar: 'rgba(16, 13, 45, 0.46)',
+      brickHighlight: 'rgba(236, 222, 255, 0.24)',
+      brickTint: '#7865b8',
+      brickTintAlpha: 0.34,
+      brickEdge: 'rgba(208, 177, 255, 0.62)',
     },
   }),
 
@@ -112,9 +121,13 @@ export const ARENA_VISUALS = Object.freeze({
       solidHighlight: 'rgba(207, 255, 177, 0.17)',
       solidShadow: 'rgba(0, 12, 7, 0.43)',
       solidEdge: 'rgba(156, 222, 109, 0.38)',
-      brickBase: '#716027',
-      brickMortar: 'rgba(18, 19, 5, 0.44)',
-      brickHighlight: 'rgba(244, 230, 133, 0.18)',
+      // Rust-orange panels stand out against the permanent olive machinery.
+      brickBase: '#87522d',
+      brickMortar: 'rgba(26, 12, 4, 0.46)',
+      brickHighlight: 'rgba(255, 211, 139, 0.20)',
+      brickTint: '#9b572d',
+      brickTintAlpha: 0.38,
+      brickEdge: 'rgba(255, 174, 91, 0.62)',
     },
   }),
 });

@@ -5,12 +5,15 @@
 import {
   PLAYER_COLORS, PLAYER_NAMES, SHIELD_TIME, SUDDEN_DEATH_TIME,
 } from '../../shared/constants.js';
+import { normalizeRules } from '../../shared/rules.js';
 import { getArenaVisual } from './arena-visuals.js';
 
 const SCREENS = ['menu', 'local', 'online', 'hud', 'result'];
 const SETUP_SCREENS = new Set(['menu', 'local', 'online']);
 const AMBIENT_ARENAS = ['neon', 'foundry', 'frost'];
 const SPLASH_ROTATE_MS = 7500;
+const TEAM_NAMES = ['Team Rot/Blau', 'Team Grün/Gelb'];
+const TEAM_COLORS = ['#ff7c93', '#88df63'];
 
 export function createUI(callbacks = {}) {
   const cb = callbacks;
@@ -103,6 +106,57 @@ export function createUI(callbacks = {}) {
   const getPlayers = makeSeg('seg-players');
   const getWinsLocal = makeSeg('seg-wins-local');
   const getWinsOnline = makeSeg('seg-wins-online');
+  const getBotsLocal = makeSeg('seg-bots-local');
+
+  const localModeSelect = $('sel-mode-local');
+  function syncLocalTeamControls() {
+    const teams = localModeSelect.value === 'teams';
+    const buttons = [...$('seg-bots-local').querySelectorAll('.seg-btn')];
+    if (teams) buttons.find((button) => button.dataset.val === '2')?.click();
+    for (const button of buttons) button.disabled = teams;
+  }
+  localModeSelect.addEventListener('change', syncLocalTeamControls);
+  syncLocalTeamControls();
+
+  const onlineModeSelect = $('sel-mode-online');
+  const onlineTargetSelect = $('sel-target-online');
+  function syncOnlineTeamControls() {
+    const teams = onlineModeSelect.value === 'teams';
+    if (teams) onlineTargetSelect.value = '4';
+    onlineTargetSelect.disabled = teams;
+  }
+  onlineModeSelect.addEventListener('change', syncOnlineTeamControls);
+  syncOnlineTeamControls();
+
+  function selected(id) {
+    return $(id).value;
+  }
+
+  function localRules() {
+    const mode = selected('sel-mode-local');
+    const botCount = mode === 'teams' ? 2 : getBotsLocal();
+    return normalizeRules({
+      winsToWin: getWinsLocal(),
+      suddenDeathSeconds: selected('sel-sudden-local'),
+      powerupRate: selected('sel-powerups-local'),
+      arena: selected('sel-arena-local'),
+      botCount,
+      mode,
+      playerTarget: getPlayers() + botCount,
+    });
+  }
+
+  function onlineRules() {
+    return normalizeRules({
+      winsToWin: getWinsOnline(),
+      suddenDeathSeconds: selected('sel-sudden-online'),
+      powerupRate: selected('sel-powerups-online'),
+      arena: selected('sel-arena-online'),
+      botCount: selected('sel-bots-online'),
+      mode: selected('sel-mode-online'),
+      playerTarget: selected('sel-target-online'),
+    });
+  }
 
   // ---- toast --------------------------------------------------------------
   const toastEl = $('toast');
@@ -134,7 +188,7 @@ export function createUI(callbacks = {}) {
 
   // ---- local setup --------------------------------------------------------
   $('btn-start-local').addEventListener('click', () => {
-    cb.onStartLocal && cb.onStartLocal(getPlayers(), getWinsLocal());
+    cb.onStartLocal && cb.onStartLocal(localRules());
   });
 
   // ---- online setup -------------------------------------------------------
@@ -148,7 +202,7 @@ export function createUI(callbacks = {}) {
   }
 
   $('btn-create-room').addEventListener('click', () => {
-    cb.onCreateRoom && cb.onCreateRoom(playerName(), getWinsOnline());
+    cb.onCreateRoom && cb.onCreateRoom(playerName(), onlineRules());
   });
   $('btn-join-room').addEventListener('click', () => {
     const code = (codeInput.value || '').trim().toUpperCase();
@@ -211,6 +265,7 @@ export function createUI(callbacks = {}) {
     syncReadyBtn();
     $('lobby-players').innerHTML = '';
     $('lobby-hint').textContent = '';
+    $('lobby-rules').textContent = '';
     resetHud();
   }
 
@@ -241,10 +296,26 @@ export function createUI(callbacks = {}) {
     if (me) { myReady = !!me.ready; syncReadyBtn(); }
 
     const hint = $('lobby-hint');
-    if (data.players.length < 2) hint.textContent = 'Warte auf mindestens einen weiteren Spieler…';
+    const playableCount = data.playableCount ?? data.players.length;
+    if (playableCount < 2) hint.textContent = 'Warte auf mindestens einen weiteren Spieler oder Bot…';
     else if (!data.canStart) hint.textContent = 'Warte, bis alle bereit sind…';
     else if (!amHost) hint.textContent = 'Bereit! Der Host kann starten.';
     else hint.textContent = 'Alle bereit — du kannst starten!';
+
+    if (data.rules) {
+      const arenaNames = {
+        shuffle: 'Zufall',
+        classic: 'Neon',
+        crossroads: 'Foundry',
+        citadel: 'Cryo',
+        switchyard: 'Switchyard',
+      };
+      const mode = data.rules.mode === 'teams' ? '2v2' : 'FFA';
+      $('lobby-rules').textContent =
+        `${mode} · ${arenaNames[data.rules.arena] || 'Zufall'} · ` +
+        `${data.rules.powerupRate} Power-ups · Sudden Death ${data.rules.suddenDeathSeconds}s · ` +
+        `${data.rules.botCount} Bot${data.rules.botCount === 1 ? '' : 's'}`;
+    }
   }
 
   // ---- HUD ----------------------------------------------------------------
@@ -274,12 +345,14 @@ export function createUI(callbacks = {}) {
     for (const p of players) {
       const color = PLAYER_COLORS[p.slot] || '#fff';
       const youTag = localSlots.includes(p.slot) ? ' ◂' : '';
+      const botTag = p.bot ? ' 🤖' : '';
+      const teamTag = p.team != null ? ` · T${p.team + 1}` : '';
       const card = document.createElement('div');
       card.className = 'hud-card';
       card.style.borderLeftColor = color;
       card.innerHTML = `
         <div class="hc-main">
-          <span class="hc-name" style="color:${color}">${escapeHtml(p.name)}${youTag}</span>
+          <span class="hc-name" style="color:${color}">${escapeHtml(p.name)}${botTag}${teamTag}${youTag}</span>
           <span class="hc-score">Siege: ${p.score}</span>
         </div>
         <div class="hc-stats">
@@ -307,7 +380,8 @@ export function createUI(callbacks = {}) {
     const arenaVisual = getArenaVisual(snap);
 
     // Rebuild only when the roster (slots / names / who is local) changes.
-    const rosterKey = players.map((p) => `${p.slot}:${p.name}`).join('|') + '#' + localSlots.join(',');
+    const rosterKey = players.map((p) => `${p.slot}:${p.name}:${p.bot}:${p.team}`).join('|') +
+      '#' + localSlots.join(',');
     if (rosterKey !== hudRosterKey) {
       buildHudCards(players, localSlots);
       hudRosterKey = rosterKey;
@@ -316,7 +390,7 @@ export function createUI(callbacks = {}) {
     for (const p of players) {
       const c = hudCards.get(p.slot);
       if (!c) continue;
-      const score = `Siege: ${p.score}`;
+      const score = snap.rules?.mode === 'teams' ? `Team: ${p.score}` : `Siege: ${p.score}`;
       if (c.scoreEl.textContent !== score) c.scoreEl.textContent = score;
       const mb = String(p.maxBombs); if (c.bombsEl.textContent !== mb) c.bombsEl.textContent = mb;
       const rg = String(p.range);    if (c.rangeEl.textContent !== rg) c.rangeEl.textContent = rg;
@@ -324,7 +398,11 @@ export function createUI(callbacks = {}) {
       const sh = p.shield > 0 ? `${Math.ceil(p.shieldTime ?? SHIELD_TIME)}s` : '0';
       if (c.shieldEl.textContent !== sh) c.shieldEl.textContent = sh;
       const pierce = Math.max(0, Number(p.pierce) || 0);
-      const badges = (p.ghost > 0 ? '👻' : '') + (pierce > 0 ? `💥×${pierce}` : '') + (p.kick ? '🦵' : '');
+      const badges = (p.ghost > 0 ? '👻' : '') +
+        (pierce > 0 ? `💥×${pierce}` : '') +
+        (p.kick ? '🦵' : '') +
+        (p.remote ? '📡' : '') +
+        (p.throwBombs ? '🧤' : '');
       if (c.badgesEl.textContent !== badges) c.badgesEl.textContent = badges;
       if (c.dead !== !p.alive) { c.dead = !p.alive; c.card.classList.toggle('dead', !p.alive); }
     }
@@ -340,14 +418,15 @@ export function createUI(callbacks = {}) {
     if (roundText !== lastRoundText) { hudRound.textContent = roundText; lastRoundText = roundText; }
 
     // Timer / sudden-death countdown.
-    const sudden = snap.t >= SUDDEN_DEATH_TIME;
+    const suddenDeathAt = snap.rules?.suddenDeathSeconds ?? SUDDEN_DEATH_TIME;
+    const sudden = snap.t >= suddenDeathAt;
     if (sudden !== lastSudden) { suddenDeath.hidden = !sudden; lastSudden = sudden; }
     let timerText, danger;
     if (sudden) {
       timerText = 'Die Wände schließen sich!';
       danger = true;
     } else {
-      const tLeft = SUDDEN_DEATH_TIME - snap.t;
+      const tLeft = suddenDeathAt - snap.t;
       timerText = `Sudden Death in ${Math.ceil(tLeft)}s`;
       danger = tLeft <= 15;
     }
@@ -447,13 +526,21 @@ export function createUI(callbacks = {}) {
     const winnerEl = $('result-winner');
     const isMatch = snap.phase === 'matchover';
     const winnerSlot = isMatch ? snap.matchWinner : snap.winner;
+    const teamMode = snap.rules?.mode === 'teams';
+    const winnerTeam = isMatch ? snap.matchWinnerTeam : snap.winnerTeam;
     const arenaVisual = showArenaSplash(snap);
 
     arenaEl.textContent = arenaVisual.name;
     resultPanel.style.setProperty('--arena-glow', arenaVisual.palette.frameGlow);
     title.textContent = isMatch ? 'Spiel vorbei!' : 'Runde vorbei';
 
-    if (winnerSlot === null || winnerSlot === undefined) {
+    if (teamMode && winnerTeam !== null && winnerTeam !== undefined) {
+      const color = TEAM_COLORS[winnerTeam] || '#fff';
+      const name = TEAM_NAMES[winnerTeam] || `Team ${winnerTeam + 1}`;
+      winnerEl.innerHTML = `<span class="crown">${isMatch ? '👑' : '🏆'}</span>` +
+        `<span style="color:${color}">${escapeHtml(name)}</span> ` +
+        `${isMatch ? 'gewinnt das Spiel!' : 'gewinnt die Runde'}`;
+    } else if (winnerSlot === null || winnerSlot === undefined) {
       winnerEl.innerHTML = `<span class="crown">🤝</span>Unentschieden`;
     } else {
       const color = PLAYER_COLORS[winnerSlot] || '#fff';
@@ -465,14 +552,24 @@ export function createUI(callbacks = {}) {
     // Scoreboard.
     const scores = $('result-scores');
     scores.innerHTML = '';
-    for (const p of [...snap.players].sort((a, b) => b.score - a.score)) {
-      const color = PLAYER_COLORS[p.slot] || '#fff';
+    const scoreRows = teamMode
+      ? [0, 1].map((team) => ({
+          name: TEAM_NAMES[team],
+          color: TEAM_COLORS[team],
+          score: snap.teamScores?.[team] || 0,
+        }))
+      : [...snap.players].sort((a, b) => b.score - a.score).map((p) => ({
+          name: `${p.name}${p.bot ? ' 🤖' : ''}`,
+          color: PLAYER_COLORS[p.slot] || '#fff',
+          score: p.score,
+        }));
+    for (const entry of scoreRows) {
       const row = document.createElement('div');
       row.className = 'rs-row';
       row.innerHTML = `
-        <span class="rs-swatch" style="background:${color};color:${color}"></span>
-        <span class="rs-name">${escapeHtml(p.name)}</span>
-        <span class="rs-score">${p.score}</span>
+        <span class="rs-swatch" style="background:${entry.color};color:${entry.color}"></span>
+        <span class="rs-name">${escapeHtml(entry.name)}</span>
+        <span class="rs-score">${entry.score}</span>
       `;
       scores.appendChild(row);
     }

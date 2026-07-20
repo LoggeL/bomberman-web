@@ -132,7 +132,7 @@ export function createNet(handlers = {}) {
 
   return {
     connect,
-    join(name, room, winsToWin) { send(MSG.JOIN, { name, room, winsToWin }); },
+    join(name, room, rules) { send(MSG.JOIN, { name, room, rules }); },
     sendInput(input) { send(MSG.INPUT, { input }); },
     setReady(ready) { send(MSG.READY, { ready }); },
     restart() { send(MSG.RESTART, {}); },

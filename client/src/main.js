@@ -6,6 +6,7 @@
 //              client-side *predict* our own player so it responds instantly.
 
 import { createGame, step, setInput, toSnapshot, stepPlayerGrid } from '../../shared/engine.js';
+import { arenaMechanicInput } from '../../shared/arena-mechanics.js';
 import { MIN_PLAYERS, SUDDEN_DEATH_TIME, TICK_DT } from '../../shared/constants.js';
 import { SNAPSHOT_HZ } from '../../shared/protocol.js';
 import { createRenderer } from './render.js';
@@ -94,8 +95,8 @@ let lastFrame = performance.now();
 const ui = createUI({
   sound,
   onStartLocal: startLocal,
-  onCreateRoom: (name, wins) => connectAndJoin(name, '', wins),
-  onJoinRoom: (name, code) => connectAndJoin(name, code, 3),
+  onCreateRoom: (name, rules) => connectAndJoin(name, '', rules),
+  onJoinRoom: (name, code) => connectAndJoin(name, code, null),
   onToggleReady: (ready) => { if (net) net.setReady(ready); },
   onStartOnline: () => { if (net) net.setReady(true); }, // host: mark ready -> server auto-starts when all ready
   onRestart: onRestart,
@@ -105,7 +106,7 @@ const ui = createUI({
 // ===========================================================================
 // LOCAL MODE
 // ===========================================================================
-function startLocal(_numPlayers, winsToWin) {
+function startLocal(rules) {
   teardownOnline();
   teardownLocal();
   sound.stopMusic();
@@ -117,8 +118,12 @@ function startLocal(_numPlayers, winsToWin) {
     defs.push({ id: `local-${slot}`, slot, name: undefined });
     localSlots.push(slot);
   }
+  for (let index = 0; index < (rules?.botCount || 0); index++) {
+    const slot = numPlayers + index;
+    defs.push({ id: `bot-${slot}`, slot, name: `Bot ${index + 1}`, bot: true });
+  }
 
-  localGame = createGame(defs, { seed: (Math.random() * 1e9) | 0, winsToWin });
+  localGame = createGame(defs, { seed: (Math.random() * 1e9) | 0, rules });
   localInput = createLocalInput(numPlayers);
   localInput.attach();
   acc = 0;
@@ -176,7 +181,7 @@ function stepLocal(frameDt) {
 // ===========================================================================
 // ONLINE MODE
 // ===========================================================================
-function connectAndJoin(name, room, winsToWin) {
+function connectAndJoin(name, room, rules) {
   teardownLocal();
   resetOnlineState();
   sound.stopMusic();
@@ -191,7 +196,7 @@ function connectAndJoin(name, room, winsToWin) {
     },
     onLobby: (msg) => {
       onlineHostSlot = msg.host;
-      onlinePlayerCount = msg.players.length;
+      onlinePlayerCount = msg.playableCount ?? msg.players.length;
       ui.updateLobby(msg);
       // Host ownership can change after a disconnect, including while the final
       // result is open. Refresh just the action without replaying the overlay.
@@ -220,15 +225,19 @@ function connectAndJoin(name, room, winsToWin) {
       // Detect SFX/shake events against the previously-held server snapshot,
       // then buffer this one for interpolation and reconcile our prediction.
       const discontinuity = isSnapshotDiscontinuity(curSnap, snap);
+      const previousLocal = curSnap?.players.find((player) => player.slot === mySlot);
+      const nextLocal = snap.players.find((player) => player.slot === mySlot);
+      const localTeleported = previousLocal && nextLocal &&
+        (previousLocal.teleportSeq || 0) !== (nextLocal.teleportSeq || 0);
       syncSnapshotMusic(snap);
       detectEvents(discontinuity ? null : curSnap, snap);
-      if (discontinuity) {
+      if (discontinuity || localTeleported) {
         // Respawns are teleports by design. Blending a dead position from the
         // previous round into a spawn point makes remote players streak across
         // the board and leaves local prediction/bombs attached to stale state.
         snapBuf = [];
         clearPredictionState();
-        clearPickupPopups();
+        if (discontinuity) clearPickupPopups();
       }
       curSnap = snap;
       snapBuf.push({ snap, at: performance.now() });
@@ -257,8 +266,8 @@ function connectAndJoin(name, room, winsToWin) {
   // wait for the socket to open before sending — small poll keeps net.js simple.
   const trySend = () => {
     if (!net) return;
-    // winsToWin is honoured by the server only for the room creator (host).
-    net.join(name, room, winsToWin);
+    // Match rules are honoured by the server only for the room creator (host).
+    net.join(name, room, rules);
   };
   // Give the socket a tick to open; net.send no-ops until OPEN, so retry a few times.
   let attempts = 0;
@@ -316,7 +325,14 @@ function tickOnline(frameDt) {
     // Mirror the server's 60 Hz fixed steps. The old per-frame 50 ms cap threw
     // away half the elapsed time at 10 FPS, guaranteeing a later rubber-band.
     predictionAcc = advanceFixedPrediction(predictionAcc, frameDt, (pdt) => {
-      stepPlayerGrid(curSnap.grid, bombs, predicted, inp, pdt);
+      // Frost momentum is authoritative gameplay, so prediction must apply the
+      // same input transform or the next snapshot would pull us back onto the
+      // server's ice lane.
+      const predictedInput = arenaMechanicInput(curSnap.mechanic, predicted, inp, {
+        grid: curSnap.grid,
+        bombs,
+      });
+      stepPlayerGrid(curSnap.grid, bombs, predicted, predictedInput, pdt);
       // Tick predicted wallpass too (re-synced from authority on snapshots).
       if (predicted.ghost > 0) predicted.ghost = Math.max(0, predicted.ghost - pdt);
     });
@@ -416,7 +432,7 @@ function interpolatedView() {
 function sameInput(a, b) {
   if (!a || !b) return false;
   return a.up === b.up && a.down === b.down && a.left === b.left &&
-         a.right === b.right && a.bomb === b.bomb;
+         a.right === b.right && a.bomb === b.bomb && a.action === b.action;
 }
 
 // ===========================================================================
@@ -429,7 +445,8 @@ function syncSnapshotMusic(snap) {
     sound.stopMusic();
     return;
   }
-  sound.syncMusic(snap.arena, { suddenDeath: snap.t >= SUDDEN_DEATH_TIME });
+  const suddenDeathAt = snap.rules?.suddenDeathSeconds ?? SUDDEN_DEATH_TIME;
+  sound.syncMusic(snap.arena, { suddenDeath: snap.t >= suddenDeathAt });
 }
 
 function detectEvents(prev, snap) {
@@ -444,6 +461,7 @@ function detectEvents(prev, snap) {
     const wasMoving = o.vx || o.vy;
     const nowMoving = b.vx || b.vy;
     if (!wasMoving && nowMoving) sound.play('kick');
+    if (!(o.airTime > 0) && b.airTime > 0) sound.play('throw');
   }
 
   // New explosion centres -> detonation + screen shake.
@@ -473,6 +491,7 @@ function detectEvents(prev, snap) {
       sound.play('shield');
       renderer.shake(10);
     }
+    if ((p.teleportSeq || 0) !== (o.teleportSeq || 0)) sound.play('portal');
     // Player just died.
     if (o.alive && !p.alive) sound.play('death');
   }
@@ -521,7 +540,8 @@ function updateHudThrottled(snap, slots, frameDt) {
 function showOnlineResult(snap) {
   const isMatch = snap.phase === 'matchover';
   const amHost = onlineHostSlot === mySlot;
-  const enoughPlayers = onlinePlayerCount >= MIN_PLAYERS;
+  const enoughPlayers = onlinePlayerCount >=
+    (snap.rules?.playerTarget ?? MIN_PLAYERS);
   const canRestart = isMatch && amHost && enoughPlayers;
   ui.showResult(snap, {
     canRestart,
@@ -533,7 +553,8 @@ function showOnlineResult(snap) {
 
 function syncOnlineResultAction() {
   const amHost = onlineHostSlot === mySlot;
-  const enoughPlayers = onlinePlayerCount >= MIN_PLAYERS;
+  const enoughPlayers = onlinePlayerCount >=
+    (curSnap?.rules?.playerTarget ?? MIN_PLAYERS);
   const canRestart = amHost && enoughPlayers;
   ui.setResultAction({
     visible: true,
@@ -546,12 +567,13 @@ function syncOnlineResultAction() {
 
 function onRestart() {
   if (mode === 'local' && localGame?.phase === 'matchover') {
-    // Recreate a fresh match with the same player count / wins.
-    const numPlayers = localGame.players.length;
-    const winsToWin = localGame.winsToWin;
-    startLocal(numPlayers, winsToWin);
+    // Recreate a fresh match with the same normalized rules.
+    const rules = localGame.rules;
+    startLocal(rules);
   } else if (mode === 'online' && net && curSnap?.phase === 'matchover' &&
-             onlineHostSlot === mySlot && onlinePlayerCount >= MIN_PLAYERS && !restartPending) {
+             onlineHostSlot === mySlot &&
+             onlinePlayerCount >= (curSnap.rules?.playerTarget ?? MIN_PLAYERS) &&
+             !restartPending) {
     // Keep the result visible and disabled until START confirms the new match.
     // This makes double clicks and stale terminal snapshots harmless.
     restartPending = true;

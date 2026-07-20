@@ -64,8 +64,8 @@
               <tr><th>Spieler</th><th>Bewegen</th><th>Bombe</th></tr>
             </thead>
             <tbody>
-              <tr><td><span class="dot" style="--c:#ff5470"></span>Rot</td><td>W A S D</td><td>Leertaste</td></tr>
-              <tr><td><span class="dot" style="--c:#3fb6ff"></span>Blau</td><td>Pfeiltasten</td><td>Enter</td></tr>
+              <tr><td><span class="dot" style="--c:#ff5470"></span>Rot</td><td>W A S D</td><td>Leertaste · Shift</td></tr>
+              <tr><td><span class="dot" style="--c:#3fb6ff"></span>Blau</td><td>Pfeiltasten</td><td>Enter · Shift</td></tr>
             </tbody>
           </table>
         </div>
@@ -80,6 +80,8 @@
             <li><span class="pu-ic" style="--c:#ff8a3f">💥</span>Durchschlag</li>
             <li><span class="pu-ic" style="--c:#3fe0ff">🛡</span>Schild</li>
             <li><span class="pu-ic" style="--c:#ff7ed4">🦵</span>Bomben kicken</li>
+            <li><span class="pu-ic" style="--c:#8fe7ff">📡</span>Fernzünder</li>
+            <li><span class="pu-ic" style="--c:#f4a8ff">🧤</span>Bomben werfen</li>
           </ul>
         </div>
 
@@ -106,6 +108,50 @@
             <button class="seg-btn is-active" data-val="3">3</button>
             <button class="seg-btn" data-val="5">5</button>
           </div>
+        </div>
+
+        <div class="field">
+          <label>Modus</label>
+          <select class="text-input" id="sel-mode-local">
+            <option value="ffa">Jeder gegen jeden</option>
+            <option value="teams">2 gegen 2</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Bots</label>
+          <div class="seg" id="seg-bots-local" role="group" aria-label="Anzahl Bots">
+            <button class="seg-btn is-active" data-val="0">0</button>
+            <button class="seg-btn" data-val="1">1</button>
+            <button class="seg-btn" data-val="2">2</button>
+          </div>
+        </div>
+
+        <div class="field rules-grid">
+          <label>Arena
+            <select class="text-input" id="sel-arena-local">
+              <option value="shuffle">Zufällig</option>
+              <option value="classic">Neon Reactor</option>
+              <option value="crossroads">Magma Foundry</option>
+              <option value="citadel">Cryo Circuit</option>
+              <option value="switchyard">Switchyard</option>
+            </select>
+          </label>
+          <label>Power-ups
+            <select class="text-input" id="sel-powerups-local">
+              <option value="low">Wenige</option>
+              <option value="normal" selected>Normal</option>
+              <option value="high">Viele</option>
+            </select>
+          </label>
+          <label>Sudden Death
+            <select class="text-input" id="sel-sudden-local">
+              <option value="45">45 Sekunden</option>
+              <option value="60">60 Sekunden</option>
+              <option value="90" selected>90 Sekunden</option>
+              <option value="120">120 Sekunden</option>
+            </select>
+          </label>
         </div>
 
         <div class="row-buttons">
@@ -145,6 +191,54 @@
             </div>
           </div>
 
+          <div class="field rules-grid">
+            <label>Modus
+              <select class="text-input" id="sel-mode-online">
+                <option value="ffa">Jeder gegen jeden</option>
+                <option value="teams">2 gegen 2</option>
+              </select>
+            </label>
+            <label>Ziel-Spieler
+              <select class="text-input" id="sel-target-online">
+                <option value="2">2 Spieler</option>
+                <option value="3">3 Spieler</option>
+                <option value="4">4 Spieler</option>
+              </select>
+            </label>
+            <label>Bots
+              <select class="text-input" id="sel-bots-online">
+                <option value="0">Keine</option>
+                <option value="1">1 Bot</option>
+                <option value="2">2 Bots</option>
+                <option value="3">3 Bots</option>
+              </select>
+            </label>
+            <label>Arena
+              <select class="text-input" id="sel-arena-online">
+                <option value="shuffle">Zufällig</option>
+                <option value="classic">Neon Reactor</option>
+                <option value="crossroads">Magma Foundry</option>
+                <option value="citadel">Cryo Circuit</option>
+                <option value="switchyard">Switchyard</option>
+              </select>
+            </label>
+            <label>Power-ups
+              <select class="text-input" id="sel-powerups-online">
+                <option value="low">Wenige</option>
+                <option value="normal" selected>Normal</option>
+                <option value="high">Viele</option>
+              </select>
+            </label>
+            <label>Sudden Death
+              <select class="text-input" id="sel-sudden-online">
+                <option value="45">45 Sekunden</option>
+                <option value="60">60 Sekunden</option>
+                <option value="90" selected>90 Sekunden</option>
+                <option value="120">120 Sekunden</option>
+              </select>
+            </label>
+          </div>
+
           <div class="row-buttons">
             <button class="btn btn-ghost" data-back>Zurück</button>
           </div>
@@ -159,6 +253,7 @@
           </div>
 
           <ul class="player-list" id="lobby-players"></ul>
+          <p class="lobby-rules" id="lobby-rules"></p>
 
           <div class="row-buttons">
             <button class="btn btn-ghost" id="btn-leave-room">Verlassen</button>
@@ -213,8 +308,10 @@
         <button class="dpad-btn dpad-right" data-dir="right" aria-label="Rechts">▶</button>
         <button class="dpad-btn dpad-down" data-dir="down" aria-label="Runter">▼</button>
       </div>
-      <!-- Bomb Button -->
-      <button class="bomb-btn" id="bomb-btn" aria-label="Bombe">💣</button>
+      <div class="mobile-actions">
+        <button class="action-btn" id="action-btn" aria-label="Spezialaktion">⚡</button>
+        <button class="bomb-btn" id="bomb-btn" aria-label="Bombe">💣</button>
+      </div>
     </div>
 
     <!-- ============================= TOAST ============================= -->

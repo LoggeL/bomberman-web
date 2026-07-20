@@ -203,6 +203,15 @@ export function createSound() {
       tone('sine', 180, 320, t0, 0.14, 0.26);
       noise(t0, 0.1, 0.16, 1400);
     },
+    // Bomb thrown into the air: quick elastic lift.
+    throw(t0) {
+      tone('sine', 260, 620, t0, 0.18, 0.2);
+      noise(t0, 0.07, 0.08, 2200);
+    },
+    portal(t0) {
+      tone('sine', 320, 980, t0, 0.22, 0.18);
+      tone('triangle', 880, 440, t0 + 0.05, 0.2, 0.12);
+    },
   };
 
   // -------------------------------------------------------------------------

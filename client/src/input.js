@@ -17,13 +17,13 @@
 // ----------------------------------------------------------------------------
 const KEYMAPS = [
   // P0 — Rot: WASD + Space
-  { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', bomb: 'Space' },
+  { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', bomb: 'Space', action: 'ShiftLeft' },
   // P1 — Blau: Arrows + Enter
-  { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', bomb: 'Enter' },
+  { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', bomb: 'Enter', action: 'ShiftRight' },
   // P2 — Grün: IJKL + U
-  { up: 'KeyI', down: 'KeyK', left: 'KeyJ', right: 'KeyL', bomb: 'KeyU' },
+  { up: 'KeyI', down: 'KeyK', left: 'KeyJ', right: 'KeyL', bomb: 'KeyU', action: 'KeyO' },
   // P3 — Gelb: TFGH + R
-  { up: 'KeyT', down: 'KeyG', left: 'KeyF', right: 'KeyH', bomb: 'KeyR' },
+  { up: 'KeyT', down: 'KeyG', left: 'KeyF', right: 'KeyH', bomb: 'KeyR', action: 'KeyY' },
 ];
 
 // Codes we never want to bubble to the browser (page scroll, etc.).
@@ -78,6 +78,7 @@ function readSlot(slot) {
     left: pressed.has(m.left),
     right: pressed.has(m.right),
     bomb: pressed.has(m.bomb),
+    action: pressed.has(m.action),
   };
 }
 
@@ -91,6 +92,7 @@ const TOUCH_CODES = {
   left: 'KeyA',
   right: 'KeyD',
   bomb: 'Space',
+  action: 'ShiftLeft',
 };
 
 let touchControlsReady = false;
@@ -119,6 +121,7 @@ export function initTouchControls() {
 
   const dpad = document.getElementById('dpad');
   const bombBtn = document.getElementById('bomb-btn');
+  const actionBtn = document.getElementById('action-btn');
 
   function bindHold(el, code) {
     const start = (e) => {
@@ -149,6 +152,7 @@ export function initTouchControls() {
 
   // Bomb button
   bindHold(bombBtn, TOUCH_CODES.bomb);
+  if (actionBtn) bindHold(actionBtn, TOUCH_CODES.action);
 
   // Prevent the whole controls area from scrolling / double-tap-zoom
   container.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
@@ -188,7 +192,7 @@ export function createLocalInput(count = 4) {
 export function createPlayerInput(_slot = 0) {
   let attached = false;
   return {
-    /** @returns {{up,down,left,right,bomb}} */
+    /** @returns {{up,down,left,right,bomb,action}} */
     current() { return readSlot(0); },
     attach() { if (!attached) { attached = true; attachGlobal(); } },
     detach() { if (attached) { attached = false; detachGlobal(); } },

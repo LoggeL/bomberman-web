@@ -28,6 +28,7 @@ export function predictionFromSnapshot(player) {
   return {
     x: player.x,
     y: player.y,
+    alive: player.alive !== false,
     dir: player.dir,
     moving: player.moving,
     speedPicks: player.speedPicks,
@@ -92,6 +93,9 @@ function lerp(a, b, t) {
 // A plain x/y lerp cuts diagonally across the inside of a turn whenever two
 // snapshots land on different legs of the corner.
 export function interpolateGridPlayer(previous, next, amount) {
+  if ((previous.teleportSeq || 0) !== (next.teleportSeq || 0)) {
+    return { x: next.x, y: next.y, dir: next.dir, moving: next.moving };
+  }
   const t = Math.max(0, Math.min(1, Number.isFinite(amount) ? amount : 1));
   const dx = next.x - previous.x;
   const dy = next.y - previous.y;

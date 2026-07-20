@@ -15,9 +15,19 @@ import {
   BASE_SPEED, SPEED_PER_PICKUP, MAX_SPEED_PICKUPS,
   START_BOMBS, START_RANGE, MAX_BOMBS, MAX_RANGE, MAX_PIERCE,
   SHIELD_INVULN, SHIELD_TIME, GHOST_TIME, KICK_SPEED,
+  BOMB_THROW_DISTANCE, BOMB_THROW_TIME,
   SPAWNS, ROUND_END_DELAY, SUDDEN_DEATH_TIME, SPAWN_BOMB_LOCK,
 } from './constants.js';
 import { generateArena } from './arenas.js';
+import { normalizeRules } from './rules.js';
+import {
+  arenaMechanicInput,
+  arenaMechanicSnapshot,
+  createArenaMechanic,
+  prepareArenaMechanic,
+  stepArenaMechanic,
+} from './arena-mechanics.js';
+import { decideBotInput } from './bot-ai.js';
 
 const PLAYER_HALF = 0.34; // half the player's collision box, in tiles (death/pickup checks)
 
@@ -27,7 +37,12 @@ const inBounds = (col, row) => col >= 0 && col < COLS && row >= 0 && row < ROWS;
 // ---- construction ------------------------------------------------------------
 
 // playerDefs: [{ id, name, slot }]. winsToWin: rounds needed to win the match.
-export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
+export function createGame(playerDefs, options = {}) {
+  const seed = options.seed ?? 1;
+  const rules = normalizeRules({
+    ...(options.rules || {}),
+    ...(options.winsToWin == null ? {} : { winsToWin: options.winsToWin }),
+  });
   const state = {
     grid: new Uint8Array(COLS * ROWS),
     hidden: new Map(),   // key -> POWERUP kind hidden under a brick
@@ -41,10 +56,15 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
     phaseTimer: 0,
     winner: null,        // slot of round winner, or null for a draw
     matchWinner: null,
-    winsToWin,
+    winnerTeam: null,
+    matchWinnerTeam: null,
+    teamScores: [0, 0],
+    winsToWin: rules.winsToWin,
+    rules,
     seed,
     arenaId: null,
     arenaTheme: null,
+    mechanic: null,
     spiral: null,        // sudden-death cell order
     spiralIdx: 0,
     spiralTimer: 0,
@@ -56,6 +76,8 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
       id: def.id,
       slot: def.slot,
       name: def.name ?? `P${def.slot + 1}`,
+      team: rules.mode === 'teams' ? Math.floor(def.slot / 2) : null,
+      bot: !!def.bot,
       x: 0, y: 0, dir: 'down',
       alive: true,
       maxBombs: START_BOMBS,
@@ -66,9 +88,12 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
       shield: 0,       // one-hit blocker while shieldTime remains
       shieldTime: 0,   // seconds before an unused shield expires
       kick: false,     // can kick bombs
+      remote: false,   // secondary action detonates owned remote bombs
+      throwBombs: false, // secondary action throws an adjacent bomb
       invuln: 0,       // seconds of i-frames remaining after a shield pop
       score: 0,
       bombHeld: false,
+      actionHeld: false,
       bombLock: 0,      // spawn grace: prevents fat-finger bomb drops right after respawn
       // Tile-step movement state: a player rests on a cell centre and glides one
       // whole tile toward (tx, ty) while `stepping`.
@@ -85,12 +110,18 @@ export function createGame(playerDefs, { seed = 1, winsToWin = 3 } = {}) {
 // Builds a fresh map and respawns every player to their corner.
 function generateRound(state) {
   const g = state.grid;
-  const arena = generateArena({ seed: state.seed, round: state.round });
+  const arena = generateArena({
+    seed: state.seed,
+    round: state.round,
+    arena: state.rules.arena,
+    powerupRate: state.rules.powerupRate,
+  });
   // `time` is elapsed time for the CURRENT round (it is exposed as `snap.t`
   // and drives sudden death/the HUD), not the lifetime of the match.
   state.time = 0;
   state.phaseTimer = 0;
   state.winner = null;
+  state.winnerTeam = null;
   state.arenaId = arena.id;
   state.arenaTheme = arena.theme;
   state.hidden.clear();
@@ -102,6 +133,8 @@ function generateRound(state) {
   state.spiralIdx = 0;
   state.spiralTimer = 0;
   g.set(arena.grid);
+  state.mechanic = createArenaMechanic({ id: arena.id, theme: arena.theme });
+  prepareArenaMechanic(state.mechanic, state);
 
   for (const p of state.players) {
     const s = SPAWNS[p.slot];
@@ -110,6 +143,7 @@ function generateRound(state) {
     p.dir = 'down';
     p.alive = true;
     p.bombHeld = false;
+    p.actionHeld = false;
     p.bombLock = SPAWN_BOMB_LOCK;
     p.stepping = false;
     p.tx = p.x;
@@ -124,6 +158,8 @@ function generateRound(state) {
     p.shield = 0;
     p.shieldTime = 0;
     p.kick = false;
+    p.remote = false;
+    p.throwBombs = false;
     p.moving = false;
   }
 }
@@ -231,9 +267,9 @@ function placeBomb(state, p) {
   if (state.bombs.some((b) => b.col === col && b.row === row)) return;
   state.bombs.push({
     id: state.bombSeq++, col, row, owner: p.slot,
-    timer: BOMB_FUSE, range: p.range, pierce: p.pierce,
+    timer: BOMB_FUSE, range: p.range, pierce: p.pierce, remote: p.remote,
     // Continuous position (centre-based) + slide velocity for kicked bombs.
-    x: col + 0.5, y: row + 0.5, vx: 0, vy: 0,
+    x: col + 0.5, y: row + 0.5, z: 0, vx: 0, vy: 0, airTime: 0,
   });
 }
 
@@ -252,7 +288,7 @@ function bombCanEnter(state, self, col, row) {
 // can never skip past a wall regardless of speed. Its logical (col,row) tracks
 // the nearest cell so detonation/chains stay grid-correct.
 function updateBombSlide(state, b, dt) {
-  if (b.vx === 0 && b.vy === 0) return;
+  if (b.airTime > 0 || (b.vx === 0 && b.vy === 0)) return;
   // Safety: if a wall closed onto our cell mid-slide, back out to the cell we
   // came from and stop, so we never end up embedded in (or tunnel through) it.
   const here = state.grid[key(Math.round(b.x - 0.5), Math.round(b.y - 0.5))];
@@ -283,6 +319,22 @@ function updateBombSlide(state, b, dt) {
   b.row = Math.round(b.y - 0.5);
 }
 
+function updateThrownBomb(b, dt) {
+  if (!(b.airTime > 0)) return;
+  b.airTime = Math.max(0, b.airTime - dt);
+  const progress = 1 - b.airTime / BOMB_THROW_TIME;
+  b.x = b.throwFromX + (b.col + 0.5 - b.throwFromX) * progress;
+  b.y = b.throwFromY + (b.row + 0.5 - b.throwFromY) * progress;
+  b.z = Math.sin(progress * Math.PI) * 0.9;
+  if (b.airTime === 0) {
+    b.x = b.col + 0.5;
+    b.y = b.row + 0.5;
+    b.z = 0;
+    delete b.throwFromX;
+    delete b.throwFromY;
+  }
+}
+
 // If a kick-capable player at a centre pushes into a stationary bomb that has
 // somewhere to go, launch it sliding in that direction.
 function tryKick(state, p, inp) {
@@ -295,6 +347,53 @@ function tryKick(state, p, inp) {
   if (!bomb) return;
   if (!bombCanEnter(state, bomb, tcol + dir.dx, trow + dir.dy)) return; // nowhere to slide
   bomb.vx = dir.dx; bomb.vy = dir.dy;
+}
+
+function facingDelta(dir) {
+  if (dir === 'left') return [-1, 0];
+  if (dir === 'right') return [1, 0];
+  if (dir === 'up') return [0, -1];
+  return [0, 1];
+}
+
+function tryThrowBomb(state, p) {
+  if (p.stepping) return false;
+  const [dc, dr] = facingDelta(p.dir);
+  const pc = Math.round(p.x - 0.5), pr = Math.round(p.y - 0.5);
+  const bomb = state.bombs.find((b) =>
+    b.col === pc + dc && b.row === pr + dr &&
+    !(b.airTime > 0) && b.vx === 0 && b.vy === 0);
+  if (!bomb) return false;
+
+  let landing = null;
+  for (let distance = 1; distance <= BOMB_THROW_DISTANCE; distance++) {
+    const col = bomb.col + dc * distance;
+    const row = bomb.row + dr * distance;
+    if (!inBounds(col, row)) break;
+    if (state.grid[key(col, row)] !== CELL.EMPTY) continue;
+    if (state.bombs.some((other) => other !== bomb && other.col === col && other.row === row)) continue;
+    landing = { col, row };
+  }
+  if (!landing) return false;
+
+  bomb.throwFromX = bomb.x;
+  bomb.throwFromY = bomb.y;
+  bomb.col = landing.col;
+  bomb.row = landing.row;
+  bomb.vx = 0;
+  bomb.vy = 0;
+  bomb.airTime = BOMB_THROW_TIME;
+  bomb.z = 0;
+  return true;
+}
+
+function usePlayerAction(state, p) {
+  if (p.throwBombs && tryThrowBomb(state, p)) return;
+  if (!p.remote) return;
+  const oldest = state.bombs
+    .filter((b) => b.owner === p.slot && b.remote && b.timer > 0)
+    .sort((a, b) => a.id - b.id)[0];
+  if (oldest) oldest.timer = 0;
 }
 
 function detonate(state, bomb, toExplode) {
@@ -353,6 +452,56 @@ function addFlame(state, col, row, kind, orient) {
   state.flames.push({ col, row, kind, orient, timer: FLAME_TIME, fresh: true });
 }
 
+function damagePlayer(p) {
+  if (!p.alive || p.invuln > 0) return false;
+  if (p.shield > 0) {
+    p.shield = 0;
+    p.shieldTime = 0;
+    p.invuln = SHIELD_INVULN;
+    return false;
+  }
+  p.alive = false;
+  return true;
+}
+
+function mechanicWorld(state) {
+  return {
+    grid: state.grid,
+    hidden: state.hidden,
+    powerups: state.powerups,
+    players: state.players,
+    bombs: state.bombs,
+    canPlayerEnter: (player, col, row) =>
+      cellWalkable(state.grid, state.bombs, col, row, player.ghost > 0),
+    canBombEnter: (bomb, col, row) => bombCanEnter(state, bomb, col, row),
+    kill: (player) => damagePlayer(player),
+    onMechanicEvent: (event) => {
+      if (event.type !== 'portal') return;
+      const player = state.players.find((candidate) => candidate.slot === event.player);
+      if (player) player.teleportSeq = (player.teleportSeq || 0) + 1;
+    },
+  };
+}
+
+function updateBotHazards(state) {
+  const snapshot = arenaMechanicSnapshot(state.mechanic);
+  if (snapshot?.kind !== 'lava') {
+    state.hazards = [];
+    return;
+  }
+  const remaining = Math.max(0, snapshot.phaseDuration - snapshot.phaseElapsed);
+  state.hazards = (snapshot.vents || [])
+    .filter((vent) => vent.state === 'telegraph' || vent.state === 'active')
+    .map((vent) => ({
+      col: vent.col,
+      row: vent.row,
+      active: vent.state === 'active',
+      warning: vent.state === 'telegraph',
+      startsIn: vent.state === 'telegraph' ? remaining : 0,
+      duration: vent.state === 'active' ? remaining : snapshot.activeTime,
+    }));
+}
+
 // ---- main step ---------------------------------------------------------------
 
 // Advances the simulation by one fixed tick. Call repeatedly with TICK_DT.
@@ -370,8 +519,11 @@ export function step(state, dt = TICK_DT) {
   state.time += dt;
 
   // 1. movement + bomb placement
+  const arenaWorld = mechanicWorld(state);
+  updateBotHazards(state);
   for (const p of state.players) {
     if (!p.alive) continue;
+    if (p.bot) p._input = decideBotInput(state, p);
     if (p.invuln > 0) p.invuln = Math.max(0, p.invuln - dt);
     if (p.ghost > 0) p.ghost = Math.max(0, p.ghost - dt);
     if (p.shieldTime > 0) {
@@ -379,7 +531,13 @@ export function step(state, dt = TICK_DT) {
       if (p.shieldTime === 0) p.shield = 0;
     }
     if (p.bombLock > 0) p.bombLock = Math.max(0, p.bombLock - dt);
-    const inp = p._input || {};
+    const rawInput = p._input || {};
+    const inp = arenaMechanicInput(state.mechanic, p, rawInput, arenaWorld);
+
+    // One shared secondary-action edge powers both advanced bomb abilities:
+    // throw the bomb in front first, otherwise detonate the oldest remote bomb.
+    if (inp.action && !p.actionHeld) usePlayerAction(state, p);
+    p.actionHeld = !!inp.action;
 
     // Kick a bomb we're walking into (before moving, so we stay put this tick
     // while the bomb slides away).
@@ -400,8 +558,15 @@ export function step(state, dt = TICK_DT) {
     }
   }
 
+  // Arena mechanics share the same authoritative tick in both local and online
+  // play. Portals/lava/rails resolve after player movement and before bomb fuses.
+  stepArenaMechanic(state.mechanic, arenaWorld, dt);
+
   // 2. bombs
-  for (const bomb of state.bombs) updateBombSlide(state, bomb, dt); // kicked bombs glide
+  for (const bomb of state.bombs) {
+    updateThrownBomb(bomb, dt);
+    updateBombSlide(state, bomb, dt);
+  }
   for (const bomb of state.bombs) bomb.timer -= dt;
   // detonate (looping so chain reactions resolve this tick)
   let exploded = true;
@@ -431,14 +596,7 @@ export function step(state, dt = TICK_DT) {
   for (const p of state.players) {
     if (!p.alive) continue;
     if (p.invuln > 0) continue;
-    if (playerInFlame(state, p)) {
-      if (p.shield > 0) {
-        p.shield = 0;
-        p.shieldTime = 0;
-        p.invuln = SHIELD_INVULN;
-      }
-      else p.alive = false;
-    }
+    if (playerInFlame(state, p)) damagePlayer(p);
   }
   // The blast has resolved for this tick — remaining flame is now just décor.
   for (const f of state.flames) f.fresh = false;
@@ -446,13 +604,34 @@ export function step(state, dt = TICK_DT) {
   // 6. round resolution
   const alive = state.players.filter((p) => p.alive);
   const everStarted = state.players.length >= 1;
-  if (everStarted && alive.length <= 1 && state.players.length >= 2) {
+  const teamMode = state.rules?.mode === 'teams';
+  const aliveTeams = teamMode ? [...new Set(alive.map((p) => p.team))] : [];
+  const roundResolved = teamMode ? aliveTeams.length <= 1 : alive.length <= 1;
+  if (everStarted && roundResolved && state.players.length >= 2) {
     state.phase = 'roundover';
     state.phaseTimer = ROUND_END_DELAY;
-    state.winner = alive.length === 1 ? alive[0].slot : null;
-    if (alive.length === 1) {
-      alive[0].score += 1;
-      if (alive[0].score >= state.winsToWin) {
+    if (teamMode) {
+      state.winnerTeam = aliveTeams.length === 1 ? aliveTeams[0] : null;
+      state.winner = state.winnerTeam == null
+        ? null
+        : (alive[0]?.slot ?? state.players.find((p) => p.team === state.winnerTeam)?.slot ?? null);
+      if (state.winnerTeam != null) {
+        state.teamScores[state.winnerTeam] += 1;
+        for (const player of state.players) {
+          player.score = state.teamScores[player.team] || 0;
+        }
+        if (state.teamScores[state.winnerTeam] >= state.winsToWin) {
+          state.phase = 'matchover';
+          state.matchWinnerTeam = state.winnerTeam;
+          state.matchWinner = state.players.find((p) => p.team === state.winnerTeam)?.slot ?? null;
+        }
+      }
+    } else {
+      state.winner = alive.length === 1 ? alive[0].slot : null;
+      if (alive.length === 1) {
+        alive[0].score += 1;
+      }
+      if (alive.length === 1 && alive[0].score >= state.winsToWin) {
         state.phase = 'matchover';
         state.matchWinner = alive[0].slot;
       }
@@ -473,6 +652,8 @@ function applyPowerup(p, kind) {
     p.shieldTime = SHIELD_TIME; // re-arm and refresh the timer
   }
   else if (kind === POWERUP.KICK) p.kick = true;
+  else if (kind === POWERUP.REMOTE) p.remote = true;
+  else if (kind === POWERUP.THROW) p.throwBombs = true;
 }
 
 function playerInFlame(state, p) {
@@ -504,7 +685,8 @@ function buildSpiral() {
 }
 
 function updateSuddenDeath(state, dt) {
-  if (state.time < SUDDEN_DEATH_TIME) return;
+  const startsAt = state.rules?.suddenDeathSeconds ?? SUDDEN_DEATH_TIME;
+  if (state.time < startsAt) return;
   if (!state.spiral) {
     // Presets have different permanent-wall masks. Skip cells that are already
     // solid so every timer pulse creates one effective new wall on every arena.
@@ -548,17 +730,25 @@ export function toSnapshot(state) {
     phaseTimer: state.phaseTimer,
     winner: state.winner,
     matchWinner: state.matchWinner,
+    winnerTeam: state.winnerTeam,
+    matchWinnerTeam: state.matchWinnerTeam,
+    teamScores: [...state.teamScores],
     winsToWin: state.winsToWin,
+    rules: state.rules,
     arena: { id: state.arenaId, theme: state.arenaTheme },
+    mechanic: arenaMechanicSnapshot(state.mechanic),
     grid: Array.from(state.grid),
     powerups,
     players: state.players.map((p) => ({
-      slot: p.slot, name: p.name, x: p.x, y: p.y, dir: p.dir,
+      slot: p.slot, name: p.name, team: p.team, bot: p.bot,
+      x: p.x, y: p.y, dir: p.dir,
       alive: p.alive, maxBombs: p.maxBombs, range: p.range,
       speedPicks: p.speedPicks, ghost: p.ghost, pierce: p.pierce,
       shield: p.shield, shieldTime: p.shieldTime,
-      kick: p.kick, invuln: p.invuln, bombLock: p.bombLock,
+      kick: p.kick, remote: p.remote, throwBombs: p.throwBombs,
+      invuln: p.invuln, bombLock: p.bombLock,
       score: p.score, moving: p.moving,
+      teleportSeq: p.teleportSeq || 0,
       // Movement internals let an online client resume prediction from the
       // exact authoritative point in a tile step instead of rounding to a cell.
       stepping: p.stepping, tx: p.tx, ty: p.ty,
@@ -566,7 +756,8 @@ export function toSnapshot(state) {
     bombs: state.bombs.map((b) => ({
       id: b.id, col: b.col, row: b.row, x: b.x, y: b.y,
       owner: b.owner,
-      vx: b.vx, vy: b.vy, timer: b.timer, range: b.range, pierce: b.pierce,
+      vx: b.vx, vy: b.vy, z: b.z || 0, airTime: b.airTime || 0,
+      timer: b.timer, range: b.range, pierce: b.pierce, remote: b.remote,
     })),
     flames: state.flames.map((f) => ({ col: f.col, row: f.row, kind: f.kind, orient: f.orient })),
   };

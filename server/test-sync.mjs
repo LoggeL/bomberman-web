@@ -8,12 +8,16 @@ import {
   interpolateGridPlayer,
   isSnapshotDiscontinuity,
   needsPredictionRebase,
+  predictionFromSnapshot,
   rebaseWithVisualCorrection,
 } from '../client/src/sync.js';
 import { DEFAULT_ARENA_VISUAL, getArenaVisual } from '../client/src/arena-visuals.js';
 import { MUSIC_TRACKS, resolveMusicTrack } from '../client/src/music.js';
+import { DEFAULT_RULES, normalizeRules } from '../shared/rules.js';
+import { arenaMechanicInput } from '../shared/arena-mechanics.js';
+import { stepPlayerGrid } from '../shared/engine.js';
 import { findPickupEffects, getPickupEffect } from '../client/src/pickup-effects.js';
-import { COLS, ROWS, CELL } from '../shared/constants.js';
+import { COLS, ROWS, CELL, TICK_DT } from '../shared/constants.js';
 
 let failed = 0;
 const ok = (condition, message) => {
@@ -136,6 +140,43 @@ console.log('remote interpolation follows corners instead of cutting diagonally'
     'straight-line interpolation remains linear');
 }
 
+console.log('portal teleports are never interpolated across the arena');
+{
+  const before = {
+    x: 7.5, y: 1.5, dir: 'down', moving: true,
+    stepping: false, tx: 7.5, ty: 1.5, teleportSeq: 0,
+  };
+  const after = {
+    ...before,
+    y: 11.5, ty: 11.5, teleportSeq: 1,
+  };
+  const pose = interpolateGridPlayer(before, after, 0.25);
+  ok(pose.x === after.x && pose.y === after.y,
+    'teleport sequence snaps directly to the destination');
+}
+
+console.log('ice momentum is shared by client prediction');
+{
+  const grid = new Array(COLS * ROWS).fill(CELL.EMPTY);
+  const predicted = predictionFromSnapshot({
+    x: 4.5, y: 6.5, alive: true, dir: 'right', moving: true,
+    speedPicks: 0, ghost: 0, stepping: false, tx: 4.5, ty: 6.5,
+  });
+  const rawInput = {
+    up: true, down: false, left: false, right: false,
+    bomb: false, action: false,
+  };
+  const input = arenaMechanicInput(
+    { kind: 'ice', cells: [{ col: 4, row: 6 }, { col: 5, row: 6 }] },
+    predicted,
+    rawInput,
+    { grid, bombs: [] },
+  );
+  stepPlayerGrid(grid, [], predicted, input, TICK_DT);
+  ok(input.right && !input.up && predicted.dir === 'right',
+    'prediction preserves the authoritative forward direction on ice');
+}
+
 console.log('predicted bombs respect the authoritative quota');
 {
   const bombs = [{ owner: 0 }, { owner: 1 }];
@@ -168,6 +209,9 @@ console.log('pickup effects identify the player and describe the ability');
     'the shield popup explains its temporary protection window');
   ok(getPickupEffect(5).text === 'Durchschlag +1',
     'the pierce popup explains that another stack was added');
+  ok(getPickupEffect(8).text === 'Fernzünder aktiv' &&
+     getPickupEffect(9).text === 'Bombenwurf aktiv',
+    'advanced bomb abilities receive explicit pickup labels');
   ok(getPickupEffect(999).text === 'Power-up',
     'unknown future pickup kinds retain a safe fallback label');
 }
@@ -182,6 +226,11 @@ console.log('arena visuals resolve snapshots and safely fall back');
     'theme metadata selects the switchyard presentation');
   ok(getArenaVisual({ id: 'future-arena' }) === DEFAULT_ARENA_VISUAL,
     'unknown arenas keep the neon fallback');
+  const tintedBricks = ['foundry', 'frost', 'reactor'].map(
+    (id) => getArenaVisual({ theme: id }).palette.brickTint,
+  );
+  ok(tintedBricks.every(Boolean) && new Set(tintedBricks).size === tintedBricks.length,
+    'non-neon arenas give destructible terrain distinct accent hues');
 }
 
 console.log('each arena resolves a distinct soundtrack');
@@ -200,6 +249,28 @@ console.log('each arena resolves a distinct soundtrack');
   ok(resolveMusicTrack(arenas[0], true).id === 'sudden-death' &&
      resolveMusicTrack(arenas[3], true).id === 'sudden-death',
     'sudden death consistently overrides every arena soundtrack');
+}
+
+console.log('match rules normalize UI and wire values');
+{
+  const rules = normalizeRules({
+    winsToWin: '12',
+    suddenDeathSeconds: '45',
+    powerupRate: 'HIGH',
+    arena: 'citadel',
+    botCount: '3',
+    mode: 'teams',
+    playerTarget: '2',
+    ignored: 'field',
+  });
+  ok(rules.winsToWin === 9 && rules.suddenDeathSeconds === 45,
+    'numeric rule values are parsed and clamped');
+  ok(rules.mode === 'teams' && rules.playerTarget === 4 && rules.botCount === 3,
+    'team mode canonicalizes a four-player target while retaining valid bots');
+  ok(rules.powerupRate === 'high' && rules.arena === 'citadel' && !('ignored' in rules),
+    'enum rules are canonical and unknown wire fields are discarded');
+  ok(Object.isFrozen(rules) && Object.isFrozen(DEFAULT_RULES),
+    'default and normalized rule sets are immutable');
 }
 
 console.log(failed === 0 ? '\nALL SYNC TESTS PASSED' : `\n${failed} SYNC TEST(S) FAILED`);

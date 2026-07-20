@@ -105,6 +105,106 @@ const run = async () => {
     host.lastSnap?.bombs.some((b) => b.owner === 0));
   ok(quickBombPlaced, 'back-to-back bomb press/release places one authoritative bomb');
 
+  console.log('bot-backed and team lobbies');
+  const solo = client();
+  await solo.open;
+  solo.send(MSG.JOIN, {
+    name: 'SoloHost',
+    room: '',
+    rules: {
+      winsToWin: 2,
+      botCount: 1,
+      playerTarget: 2,
+      arena: 'citadel',
+      suddenDeathSeconds: 45,
+    },
+  });
+  await eventually(() => solo.joined && solo.lobby);
+  ok(solo.lobby?.playableCount === 2 && solo.lobby.rules?.botCount === 1,
+    'one host plus one configured bot forms a playable lobby');
+  solo.send(MSG.READY, { ready: true });
+  ok(await eventually(() => solo.started && solo.lastSnap?.players.length === 2),
+    'solo host starts a server-authoritative bot match');
+  ok(solo.lastSnap.players.some((player) => player.bot) &&
+     solo.lastSnap.rules?.arena === 'citadel' &&
+     solo.lastSnap.rules?.suddenDeathSeconds === 45,
+    'bot and normalized host rules reach authoritative snapshots');
+  solo.ws.close();
+
+  const teamHost = client();
+  await teamHost.open;
+  teamHost.send(MSG.JOIN, {
+    name: 'TeamHost',
+    room: '',
+    rules: { mode: 'teams', botCount: 2, playerTarget: 4, winsToWin: 1 },
+  });
+  await eventually(() => teamHost.joined);
+  const teamGuest = client();
+  await teamGuest.open;
+  teamGuest.send(MSG.JOIN, { name: 'TeamGuest', room: teamHost.joined.room });
+  await eventually(() => teamGuest.joined);
+  teamGuest.send(MSG.READY, { ready: true });
+  await wait(50);
+  teamHost.send(MSG.READY, { ready: true });
+  ok(await eventually(() => teamHost.started && teamHost.lastSnap?.players.length === 4),
+    'two humans plus two bots start a full 2v2 match');
+  ok(teamHost.lastSnap.rules?.mode === 'teams' &&
+     teamHost.lastSnap.players.filter((player) => player.bot).length === 2 &&
+     new Set(teamHost.lastSnap.players.map((player) => player.team)).size === 2,
+    '2v2 snapshot exposes two teams and both bot slots');
+  await eventually(() => teamHost.lastSnap?.t > 1.05);
+  const selfBomb = {
+    input: { up: false, down: false, left: false, right: false, bomb: true, action: false },
+  };
+  const release = {
+    input: { up: false, down: false, left: false, right: false, bomb: false, action: false },
+  };
+  teamHost.send(MSG.INPUT, selfBomb);
+  teamHost.send(MSG.INPUT, release);
+  teamGuest.send(MSG.INPUT, selfBomb);
+  teamGuest.send(MSG.INPUT, release);
+  ok(await eventually(() => teamHost.lastSnap?.phase === 'matchover', 4000),
+    '2v2 reaches matchover for roster validation');
+  teamGuest.ws.close();
+  ok(await eventually(() => teamHost.lobby?.playableCount === 3),
+    'departed teammate drops the playable 2v2 roster below its target');
+  teamHost.send(MSG.RESTART, {});
+  await wait(150);
+  ok(teamHost.starts === 1 && teamHost.msgs.some((m) =>
+    m.type === MSG.ERROR && /configured rematch/i.test(m.message)),
+  '2v2 rematch is rejected until all four configured slots are playable');
+  teamHost.ws.close();
+
+  console.log('round-boundary disconnect takeover');
+  const roundHost = client();
+  await roundHost.open;
+  roundHost.send(MSG.JOIN, {
+    name: 'RoundHost',
+    room: '',
+    rules: { winsToWin: 2, playerTarget: 2 },
+  });
+  await eventually(() => roundHost.joined);
+  const roundGuest = client();
+  await roundGuest.open;
+  roundGuest.send(MSG.JOIN, { name: 'RoundGuest', room: roundHost.joined.room });
+  await eventually(() => roundGuest.joined);
+  roundGuest.send(MSG.READY, { ready: true });
+  await wait(50);
+  roundHost.send(MSG.READY, { ready: true });
+  await eventually(() => roundHost.started && roundHost.lastSnap?.t > 1.05);
+  roundHost.send(MSG.INPUT, selfBomb);
+  roundHost.send(MSG.INPUT, release);
+  ok(await eventually(() => roundHost.lastSnap?.phase === 'roundover', 4000),
+    'two-win match enters the inter-round result phase');
+  roundGuest.ws.close();
+  ok(await eventually(() =>
+    roundHost.lastSnap?.phase === 'playing' &&
+    roundHost.lastSnap.round === 2 &&
+    roundHost.lastSnap.players.some((player) =>
+      player.slot === 1 && player.bot && /Bot$/.test(player.name)), 4500),
+  'disconnect during roundover respawns as an active bot next round');
+  roundHost.ws.close();
+
   console.log('match restart idempotency');
   const rematchHost = client();
   await rematchHost.open;
@@ -154,7 +254,7 @@ const run = async () => {
   rematchGuest.send(MSG.RESTART, {});
   await wait(150);
   ok(rematchGuest.starts === 2 && rematchGuest.msgs.some((m) =>
-    m.type === MSG.ERROR && /two players/i.test(m.message)),
+    m.type === MSG.ERROR && /not enough players/i.test(m.message)),
   'one-player host rematch is rejected with an error');
 
   // Guest leaves; host should get an updated lobby/host stays.
